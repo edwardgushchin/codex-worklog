@@ -15,10 +15,10 @@ import stat
 import sys
 import tempfile
 import unicodedata
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path, PureWindowsPath
-from typing import Any, Mapping
-
+from typing import Any
 
 DEFAULT_DIRECTORY = ".dev-diary"
 DEFAULT_ENFORCEMENT = "strict"
@@ -26,6 +26,51 @@ ALLOWED_ENFORCEMENT = {"strict", "advisory", "off"}
 TAIL_BYTES = 128 * 1024
 MAX_INLINE_CHARS = 2048
 MAX_STATE_BYTES = 1024 * 1024
+MAX_APPEND_INPUT_BYTES = 32 * 1024
+MAX_ENTRY_TITLE_CHARS = 160
+ENTRY_FIELD_NAMES = (
+    "title",
+    "context",
+    "actions",
+    "changes",
+    "decisions",
+    "verification",
+    "next",
+)
+APPEND_PAYLOAD_KEYS = frozenset(("worklog_path", "marker", *ENTRY_FIELD_NAMES))
+TURN_MARKER_PATTERN = re.compile(r"<!-- codex-worklog-turn:[0-9a-f]{16} -->")
+ACKNOWLEDGEMENT_MAX_CHARS = 80
+ACKNOWLEDGEMENT_PHRASES = frozenset(
+    {
+        "большое спасибо",
+        "благодарю",
+        "всё ясно",
+        "все ясно",
+        "ок",
+        "окей",
+        "отлично",
+        "понял",
+        "поняла",
+        "поняли",
+        "принято",
+        "спасибо",
+        "спасибо большое",
+        "спс",
+        "супер",
+        "хорошо",
+        "ясно",
+        "got it",
+        "ok",
+        "okay",
+        "sounds good",
+        "thank you",
+        "thanks",
+        "thx",
+        "understood",
+    }
+)
+ACKNOWLEDGEMENT_EMOJI = frozenset({"👍", "👌", "✅", "🙏"})
+QUESTION_MARKS = frozenset({"?", "¿", "⁇", "⁈", "⁉", "？"})
 
 
 class WorklogError(RuntimeError):
@@ -52,6 +97,43 @@ def _safe_inline(value: object) -> str:
     if len(sanitized) > MAX_INLINE_CHARS:
         return f"{sanitized[: MAX_INLINE_CHARS - 1]}…"
     return sanitized
+
+
+def _is_acknowledgement_prompt(value: object) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    if len(value) > ACKNOWLEDGEMENT_MAX_CHARS:
+        return False
+    normalized = unicodedata.normalize("NFKC", value).casefold().strip()
+    if any(character in QUESTION_MARKS for character in normalized):
+        return False
+    if normalized in ACKNOWLEDGEMENT_EMOJI:
+        return True
+    phrase = "".join(
+        " "
+        if character.isspace() or unicodedata.category(character).startswith(("P", "S"))
+        else character
+        for character in normalized
+    )
+    return " ".join(phrase.split()) in ACKNOWLEDGEMENT_PHRASES
+
+
+def _entry_value(payload: Mapping[str, Any], key: str) -> str:
+    value = payload.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise WorklogError(f"append payload field {key} must be a non-empty string")
+    value = unicodedata.normalize("NFC", value.strip())
+    limit = MAX_ENTRY_TITLE_CHARS if key == "title" else MAX_INLINE_CHARS
+    if len(value) > limit:
+        raise WorklogError(f"append payload field {key} is too long")
+    if any(
+        character in "\r\n" or _unsafe_inline_character(character)
+        for character in value
+    ):
+        raise WorklogError(f"append payload field {key} must be a single safe line")
+    if "<!-- codex-worklog-" in value:
+        raise WorklogError(f"append payload field {key} contains a reserved marker")
+    return value
 
 
 def _path_is_context_safe(path: Path) -> bool:
@@ -230,12 +312,19 @@ def _load_json(path: Path) -> dict[str, Any] | None:
         isinstance(end_count, bool) or not isinstance(end_count, int) or end_count < 0
     ):
         raise WorklogError("plugin state contains an invalid session end counter")
-    for key in ("last_turn_token", "last_verified_turn_token"):
+    for key in (
+        "last_turn_token",
+        "last_verified_turn_token",
+        "last_skipped_turn_token",
+    ):
         token = payload.get(key)
         if key in payload and (
             not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{16}", token)
         ):
             raise WorklogError(f"plugin state contains an invalid {key}")
+    for key in ("last_turn_requires_entry", "material_since_checkpoint"):
+        if key in payload and not isinstance(payload.get(key), bool):
+            raise WorklogError(f"plugin state contains an invalid {key} flag")
     previous = payload.get("previous_worklog_path")
     if previous is not None and not isinstance(previous, str):
         raise WorklogError("plugin state contains an invalid previous worklog path")
@@ -436,7 +525,13 @@ def _session_state(
     state = _load_json(state_path)
     if state is not None:
         _state_worklog_path(state, payload)
+        was_closed = state.get("closed") is True
         state["closed"] = False
+        if was_closed:
+            state["material_since_checkpoint"] = False
+        elif "material_since_checkpoint" not in state:
+            # Preserve legacy behavior for an active state created before this flag.
+            state["material_since_checkpoint"] = True
         state["last_seen_at"] = now.isoformat(timespec="seconds")
         _atomic_write_json(state_path, state)
         return state, state_path
@@ -453,6 +548,7 @@ def _session_state(
         "closed": False,
         "end_count": 0,
         "last_seen_at": now.isoformat(timespec="seconds"),
+        "material_since_checkpoint": False,
         "previous_worklog_path": str(previous_path) if previous_path else None,
         "started_at": now.isoformat(timespec="seconds"),
         "workspace": str(workspace),
@@ -477,6 +573,61 @@ def _contains_recent_marker(path: Path, marker: str) -> bool:
             return encoded_marker in stream.read()
     except OSError as error:
         raise WorklogError(f"unable to inspect the worklog tail: {error}") from error
+
+
+def _append_helper_path() -> Path:
+    path = Path(__file__).absolute()
+    if not _path_is_context_safe(path):
+        raise WorklogError("append helper path is unsafe to expose to the model")
+    return path
+
+
+def _append_entry(payload: Mapping[str, Any], now: datetime | None = None) -> bool:
+    actual_keys = frozenset(payload)
+    if actual_keys != APPEND_PAYLOAD_KEYS:
+        missing = sorted(APPEND_PAYLOAD_KEYS - actual_keys)
+        unexpected = sorted(actual_keys - APPEND_PAYLOAD_KEYS)
+        details: list[str] = []
+        if missing:
+            details.append(f"missing fields: {', '.join(missing)}")
+        if unexpected:
+            details.append(f"unexpected fields: {', '.join(unexpected)}")
+        raise WorklogError(
+            f"append payload has the wrong schema ({'; '.join(details)})"
+        )
+
+    workspace = _workspace({"cwd": str(Path.cwd())})
+    raw_path = payload.get("worklog_path")
+    if not isinstance(raw_path, str) or not raw_path:
+        raise WorklogError("append payload worklog_path must be an absolute path")
+    try:
+        path = Path(raw_path).expanduser()
+    except (OSError, RuntimeError, ValueError) as error:
+        raise WorklogError("append payload worklog_path is invalid") from error
+    if not path.is_absolute():
+        raise WorklogError("append payload worklog_path must be an absolute path")
+    path = _validate_worklog_path(workspace, path)
+
+    marker = payload.get("marker")
+    if not isinstance(marker, str) or TURN_MARKER_PATTERN.fullmatch(marker) is None:
+        raise WorklogError("append payload marker is invalid")
+    values = {key: _entry_value(payload, key) for key in ENTRY_FIELD_NAMES}
+    if _contains_recent_marker(path, marker):
+        return False
+
+    timestamp = now or _now()
+    entry = (
+        f"\n\n### {timestamp:%H:%M} — {values['title']}\n\n"
+        f"- Context: {values['context']}\n"
+        f"- Actions: {values['actions']}\n"
+        f"- Changes: {values['changes']}\n"
+        f"- Decisions: {values['decisions']}\n"
+        f"- Verification: {values['verification']}\n"
+        f"- Next: {values['next']}\n\n"
+        f"{marker}\n"
+    )
+    _append_text(path, entry)
+    return True
 
 
 def _previous_worklog_for_context(state: Mapping[str, Any]) -> Path | None:
@@ -522,14 +673,24 @@ def _context_recovery_text(state: Mapping[str, Any], source: object) -> str:
 
 
 def _turn_context_text(path: str, marker: str) -> str:
+    helper_path = _append_helper_path()
     return (
-        f"Before the final answer for this turn, append one concise entry to `{_safe_inline(path)}`. "
-        "Use this shape: `### HH:MM — concise outcome`, followed by Context, Actions, Changes, "
-        "Decisions (including why), Verification, and Next. State explicitly when there were no "
-        "material changes. Before appending, refuse if the path is no longer a regular, single-link "
-        "file inside the session workspace. Append only; never rewrite previous entries. Redact "
-        "secrets and avoid raw "
-        f"prompts or tool output. End the entry with this exact marker on its own line: `{marker}`"
+        "Before the final answer for this turn, invoke the bundled helper with Python 3 and the "
+        f"`append` argument from the session working directory: `{helper_path}`. Send one JSON "
+        "object on stdin containing exactly these string keys: `worklog_path`, `marker`, `title`, "
+        "`context`, `actions`, `changes`, `decisions`, `verification`, and `next`. Set "
+        f"`worklog_path` to `{_safe_inline(path)}` and `marker` to `{marker}`. Keep every semantic "
+        "field to one concise line; include why decisions were made and state when there were no "
+        "material changes. The helper validates, timestamps, and safely appends the entry. Do not "
+        "preflight, inspect, or edit the worklog separately. Redact secrets; never include raw "
+        "prompts, transcripts, or full tool output."
+    )
+
+
+def _acknowledgement_context_text() -> str:
+    return (
+        "Codex Worklog classified this whole prompt as an acknowledgement only. Do not append or "
+        "edit a worklog entry for this turn; no turn marker is required. Answer normally."
     )
 
 
@@ -553,14 +714,22 @@ def _user_prompt(
     if not isinstance(turn_id, str) or not turn_id:
         raise WorklogError("the prompt hook did not include a turn id")
     turn_token = _token(turn_id)
+    requires_entry = not _is_acknowledgement_prompt(payload.get("prompt"))
     state["last_turn_started_at"] = now.isoformat(timespec="seconds")
     state["last_turn_token"] = turn_token
+    state["last_turn_requires_entry"] = requires_entry
+    if requires_entry:
+        state["material_since_checkpoint"] = True
     _atomic_write_json(state_path, state)
     marker = _marker(turn_token)
     return {
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
-            "additionalContext": _turn_context_text(state["worklog_path"], marker),
+            "additionalContext": (
+                _turn_context_text(state["worklog_path"], marker)
+                if requires_entry
+                else _acknowledgement_context_text()
+            ),
         }
     }
 
@@ -586,6 +755,14 @@ def _stop(
         turn_token = stored_token if isinstance(stored_token, str) else None
     if not turn_token:
         return {}
+    if (
+        turn_token == state.get("last_turn_token")
+        and state.get("last_turn_requires_entry") is False
+    ):
+        state["last_skipped_at"] = now.isoformat(timespec="seconds")
+        state["last_skipped_turn_token"] = turn_token
+        _atomic_write_json(state_path, state)
+        return {}
     marker = _marker(turn_token)
     if _contains_recent_marker(path, marker):
         state["last_verified_at"] = now.isoformat(timespec="seconds")
@@ -593,11 +770,8 @@ def _stop(
         _atomic_write_json(state_path, state)
         return {}
 
-    message = (
-        "Codex Worklog has no entry for this turn. Append a semantic entry to "
-        f"`{_safe_inline(path)}` now. "
-        "Include what happened, why decisions were made, changes, verification, and next steps; "
-        f"redact secrets and finish with `{marker}`. Do not rewrite earlier entries."
+    message = "Codex Worklog has no entry for this turn. " + _turn_context_text(
+        str(path), marker
     )
     if payload.get("stop_hook_active"):
         return {
@@ -625,6 +799,11 @@ def _session_end(
     if state.get("closed") is True:
         return {}
     path = _state_worklog_path(state, payload)
+    if state.get("material_since_checkpoint", True) is False:
+        state["closed"] = True
+        state["last_seen_at"] = now.isoformat(timespec="seconds")
+        _atomic_write_json(state_path, state)
+        return {}
     stored_end_count = state.get("end_count", 0)
     if (
         isinstance(stored_end_count, bool)
@@ -644,6 +823,7 @@ def _session_end(
     state["closed"] = True
     state["end_count"] = end_count
     state["last_seen_at"] = now.isoformat(timespec="seconds")
+    state["material_since_checkpoint"] = False
     _atomic_write_json(state_path, state)
     return {}
 
@@ -675,17 +855,40 @@ def handle_event(
         return {"systemMessage": f"Codex Worklog: {_safe_inline(error)}."}
 
 
-def main() -> int:
+def _append_main() -> int:
+    try:
+        raw_payload = sys.stdin.buffer.read(MAX_APPEND_INPUT_BYTES + 1)
+        if len(raw_payload) > MAX_APPEND_INPUT_BYTES:
+            raise WorklogError("append request is too large")
+        payload = json.loads(raw_payload.decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise WorklogError("append request must be a JSON object")
+        appended = _append_entry(payload)
+    except (json.JSONDecodeError, UnicodeError, WorklogError) as error:
+        print(f"Codex Worklog append failed: {_safe_inline(error)}.", file=sys.stderr)
+        return 2
+    except Exception as error:  # noqa: BLE001 - CLI boundary must not leak a traceback.
+        print(
+            f"Codex Worklog append internal error: {type(error).__name__}",
+            file=sys.stderr,
+        )
+        return 2
+    json.dump({"appended": appended}, sys.stdout, separators=(",", ":"))
+    sys.stdout.write("\n")
+    return 0
+
+
+def _hook_main() -> int:
     try:
         payload = json.load(sys.stdin)
         if not isinstance(payload, dict):
-            raise ValueError("hook input must be a JSON object")
+            raise TypeError("hook input must be a JSON object")
         response = handle_event(payload)
-    except (json.JSONDecodeError, ValueError) as error:
+    except (json.JSONDecodeError, TypeError, ValueError) as error:
         response = {
             "systemMessage": f"Codex Worklog received invalid hook input: {error}."
         }
-    except Exception as error:  # Defensive boundary: hooks must not crash Codex.
+    except Exception as error:  # noqa: BLE001 - hooks must not crash Codex.
         print(
             f"Codex Worklog internal error: {type(error).__name__}: {error}",
             file=sys.stderr,
@@ -694,6 +897,16 @@ def main() -> int:
     json.dump(response, sys.stdout, ensure_ascii=False, separators=(",", ":"))
     sys.stdout.write("\n")
     return 0
+
+
+def main() -> int:
+    arguments = sys.argv[1:]
+    if arguments == ["append"]:
+        return _append_main()
+    if arguments:
+        print("Codex Worklog: unknown command.", file=sys.stderr)
+        return 2
+    return _hook_main()
 
 
 if __name__ == "__main__":

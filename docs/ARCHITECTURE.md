@@ -31,7 +31,8 @@ Codex host
 - `.agents/plugins/marketplace.json` exposes the plugin through a repo marketplace.
 - `.codex-plugin/plugin.json` provides stable identity, discovery metadata, assets, and the `worklog` skill path.
 - `hooks/hooks.json` uses the default plugin hook discovery location.
-- `scripts/worklog.py` is the only runtime program and has no third-party dependencies.
+- `scripts/worklog.py` is the only runtime program. It handles lifecycle events
+  and exposes the bounded `append` command, with no third-party dependencies.
 - `skills/worklog/SKILL.md` handles explicit history inspection and context recovery.
 
 ## Lifecycle
@@ -50,11 +51,33 @@ If the same session is resumed or compacted, the existing file is reused. A new 
 
 ### UserPromptSubmit
 
-The runtime does not store the prompt. It hashes `turn_id` with SHA-256, truncates the digest, and supplies an exact Markdown marker with the entry contract. The marker proves only that an entry was appended for the turn; it does not authenticate content.
+The runtime applies a local, deterministic exact-phrase classifier to the
+current prompt and immediately discards the text. A short prompt made entirely
+of a recognized acknowledgement is marked as non-material; any additional word
+keeps the normal logging contract. Only the resulting Boolean is retained.
+
+For a material turn, the runtime hashes `turn_id` with SHA-256, truncates the
+digest, and supplies the installed helper path, its exact input schema, and an
+exact Markdown marker. The marker proves only that an entry was appended for
+the turn; it does not authenticate content.
+
+### Append helper
+
+The agent invokes `scripts/worklog.py append` once from the session `cwd` and
+sends a bounded JSON object on standard input. The helper requires the exact
+semantic field set, rejects multiline/control content and reserved markers,
+revalidates the worklog as a regular single-link file inside that `cwd`, adds
+the local timestamp, and writes with `O_APPEND`, flush, and `fsync`.
+
+If the exact turn marker already exists in the recent tail, the helper returns
+success without adding a duplicate. The agent does not perform separate path
+inspection or a general-purpose Markdown edit.
 
 ### Stop
 
-The hook reads only the tail of the current worklog and searches for the exact turn marker.
+For a turn classified as acknowledgement-only, the hook returns immediately.
+For a material turn, it reads only the tail of the current worklog and searches
+for the exact turn marker.
 
 - `strict`: ask Codex for one continuation when missing;
 - `advisory`: show a warning without continuing;
@@ -64,7 +87,10 @@ The hook reads only the tail of the current worklog and searches for the exact t
 
 ### SessionEnd
 
-The hook appends a small checkpoint and records a closed flag. Repeated end events are idempotent until the session resumes.
+The hook appends a small checkpoint only if material work occurred since the
+previous checkpoint, then records a closed flag. Repeated end events are
+idempotent until the session resumes. An acknowledgement-only resume therefore
+does not alter the existing worklog bytes.
 
 ## Storage Contract
 
@@ -89,7 +115,8 @@ State path:
 <PLUGIN_DATA>/sessions/<session-hash>.json
 ```
 
-State contains only paths, timestamps, a closed flag, an end counter, and hashed turn identifiers. It does not contain the user prompt or transcript.
+State contains only paths, timestamps, lifecycle Boolean flags, an end counter,
+and hashed turn identifiers. It does not contain the user prompt or transcript.
 
 ## Context Recovery
 

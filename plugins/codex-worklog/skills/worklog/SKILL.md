@@ -19,9 +19,12 @@ Use the workspace-local `.dev-diary/` as a compact history of Codex work. The li
 ## Maintain the log
 
 - Append; never reorder, repair, or rewrite older entries unless the user explicitly requests it.
-- Before appending, confirm the supplied path is still a regular file inside the
-  current session workspace. Refuse symbolic links, hard links, and paths whose
-  stored workspace no longer matches the session `cwd`.
+- When lifecycle context supplies the bundled append helper and turn marker,
+  invoke that helper exactly once with its exact JSON schema. It performs path
+  validation, timestamping, and the append-only write; do not preflight or edit
+  the worklog separately.
+- When lifecycle context classifies the whole prompt as acknowledgement-only,
+  do not create an entry or checkpoint for that turn.
 - Use the user's language.
 - Record semantic outcomes, not a transcript: what happened, when, why, changes, verification, and what remains.
 - State clearly when no material change occurred.

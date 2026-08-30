@@ -1,6 +1,6 @@
 {
   "name": "codex-worklog",
-  "version": "0.1.0",
+  "version": "0.1.0+codex.20260830111725",
   "description": "Keep an append-only semantic worklog in every Codex workspace and use it to recover context when needed.",
   "author": {
     "name": "Eduard Gushchin",

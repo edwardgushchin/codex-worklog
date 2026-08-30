@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "plugins" / "codex-worklog"
 MANIFEST = PLUGIN / ".codex-plugin" / "plugin.json"

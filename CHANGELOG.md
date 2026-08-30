@@ -8,6 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Routed material turn entries through one bounded append helper instead of a
+  general-purpose model file edit.
+- Skip timeline entries and session checkpoints for acknowledgement-only turns;
+  prompts with any additional instruction, question, cancellation, or decision
+  remain material.
+- Added a resume regression that requires all pre-resume bytes to remain an
+  exact prefix of the updated worklog.
 - Expanded lifecycle, path-safety, state-integrity, validator, and CLI regression coverage.
 - Hardened repository validation for manifest metadata, marketplace policy, hook commands, SVG assets, local links, and immutable GitHub Action references.
 - Updated the CI matrix to exercise minimum Python 3.10 and current Python 3.14.
@@ -21,6 +28,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Security
 
+- The append helper uses a fixed schema, bounded single-line fields, workspace
+  path revalidation, exact turn markers, and `O_APPEND` writes with `fsync`.
 - Reject symbolic or hard-linked worklog and state files before runtime reads and appends.
 - Create private files and directories with restrictive modes from the initial filesystem operation.
 - Reject non-portable directory overrides, invalid hook paths, corrupt, oversized, or cross-workspace state, and sanitize control characters in model-visible metadata.

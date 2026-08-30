@@ -54,13 +54,29 @@ The workspace does not need to be a Git repository. No project-specific `AGENTS.
 The plugin combines a skill with four lifecycle hooks:
 
 | Event | Responsibility |
-|---|---|
+| --- | --- |
 | `SessionStart` | Captures the original session `cwd`, creates or reopens the session worklog, and tells the agent how to recover context. |
-| `UserPromptSubmit` | Gives the agent the current worklog path, entry contract, and a one-way hashed completion marker. |
-| `Stop` | Verifies that the turn marker was appended and asks Codex for one bounded continuation if it was missed. |
-| `SessionEnd` | Appends an idempotent session checkpoint. |
+| `UserPromptSubmit` | Skips acknowledgement-only prompts; otherwise gives the agent one bundled append helper, the entry contract, and a one-way hashed completion marker. |
+| `Stop` | Accepts skipped acknowledgements or verifies that the turn marker was appended, with one bounded continuation if it was missed. |
+| `SessionEnd` | Appends an idempotent checkpoint only when material work occurred since the previous checkpoint. |
 
-Per-session state is stored in Codex-provided `PLUGIN_DATA`. It contains paths, timestamps, and hashed identifiers only. Prompts, transcripts, tool inputs, and tool output are not copied there.
+Per-session state is stored in Codex-provided `PLUGIN_DATA`. It contains paths,
+timestamps, hashed identifiers, and small lifecycle flags only. Prompts,
+transcripts, tool inputs, and tool output are not copied there.
+
+Material turns are written through a single bundled helper invocation. The
+helper validates the exact schema and target path, adds the local timestamp,
+and opens the worklog with append semantics; the agent does not preflight or
+edit the Markdown file separately.
+
+Prompts whose entire normalized content is a short acknowledgement such as
+`thanks`, `спасибо`, `ок`, `понял`, or `👍` deliberately produce no timeline
+entry. Any additional instruction, question, cancellation, decision, or other
+content makes the prompt material and therefore loggable.
+
+Because `SessionStart` runs before the first prompt, a brand-new session that
+contains only an acknowledgement can leave a header-only worklog file. It adds
+neither a turn entry nor a session checkpoint.
 
 An entry looks like this:
 
@@ -146,7 +162,7 @@ Worklog entries are historical evidence, not a live-state database.
 Set these environment variables before starting the Codex host:
 
 | Variable | Default | Allowed values |
-|---|---|---|
+| --- | --- | --- |
 | `CODEX_WORKLOG_DIR` | `.dev-diary` | A portable relative path without `..`, Windows drive/backslash syntax, controls, or backticks. |
 | `CODEX_WORKLOG_ENFORCEMENT` | `strict` | `strict`, `advisory`, or `off`. |
 

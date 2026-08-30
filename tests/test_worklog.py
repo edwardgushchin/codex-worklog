@@ -9,11 +9,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest import mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
-
+from unittest import mock
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 WORKLOG_SCRIPT = (
@@ -72,20 +71,54 @@ class WorklogHookTests(unittest.TestCase):
         return sorted(self.workspace.glob(".dev-diary/**/*.md"))
 
     def run_cli(
-        self, input_text: str, environment: dict[str, str] | None = None
+        self,
+        input_text: str,
+        environment: dict[str, str] | None = None,
+        arguments: tuple[str, ...] = (),
     ) -> subprocess.CompletedProcess[str]:
         command_environment = os.environ.copy()
         command_environment.pop("CODEX_WORKLOG_DIR", None)
         command_environment.pop("CODEX_WORKLOG_ENFORCEMENT", None)
         command_environment.update(environment or self.environment)
         return subprocess.run(
-            [sys.executable, "-B", str(WORKLOG_SCRIPT)],
+            [sys.executable, "-B", str(WORKLOG_SCRIPT), *arguments],
             cwd=self.workspace,
             env=command_environment,
             input=input_text,
             text=True,
             capture_output=True,
             check=False,
+        )
+
+    def append_payload(
+        self,
+        diary: Path,
+        marker: str,
+        **overrides: str,
+    ) -> dict[str, str]:
+        payload = {
+            "worklog_path": str(diary),
+            "marker": marker,
+            "title": "Completed requested work",
+            "context": "A material task required a semantic worklog entry.",
+            "actions": "Used the bundled append helper.",
+            "changes": "Recorded the verified outcome.",
+            "decisions": "Used one append-only write to preserve prior history.",
+            "verification": "The exact turn marker is present.",
+            "next": "Continue only if another task is requested.",
+        }
+        payload.update(overrides)
+        return payload
+
+    def append_with_helper(
+        self,
+        diary: Path,
+        marker: str,
+        **overrides: str,
+    ) -> subprocess.CompletedProcess[str]:
+        return self.run_cli(
+            json.dumps(self.append_payload(diary, marker, **overrides)),
+            arguments=("append",),
         )
 
     def test_inline_values_are_bounded(self) -> None:
@@ -243,6 +276,9 @@ class WorklogHookTests(unittest.TestCase):
         if marker_match is None:
             self.fail("turn marker is missing")
         marker = marker_match.group(0)
+        self.assertIn(str(WORKLOG_SCRIPT), context)
+        self.assertIn("`append` argument", context)
+        self.assertIn("Do not preflight, inspect, or edit", context)
 
         stored_text = "\n".join(
             path.read_text(encoding="utf-8")
@@ -271,10 +307,15 @@ class WorklogHookTests(unittest.TestCase):
         self.assertNotIn("secret assistant output", stored_text)
 
         diary = self.worklog_files()[0]
-        with diary.open("a", encoding="utf-8", newline="\n") as stream:
-            stream.write(
-                f"\n\n### 11:15 — Tested\n\n- Decisions: Verify markers.\n\n{marker}\n"
-            )
+        appended = self.append_with_helper(diary, marker)
+        self.assertEqual(appended.returncode, 0)
+        self.assertEqual(json.loads(appended.stdout), {"appended": True})
+        self.assertEqual(appended.stderr, "")
+
+        duplicate = self.append_with_helper(diary, marker)
+        self.assertEqual(duplicate.returncode, 0)
+        self.assertEqual(json.loads(duplicate.stdout), {"appended": False})
+        self.assertEqual(diary.read_text(encoding="utf-8").count(marker), 1)
 
         verified = worklog.handle_event(
             self.event("Stop", turn_id="turn-one", stop_hook_active=True),
@@ -282,6 +323,94 @@ class WorklogHookTests(unittest.TestCase):
             self.now,
         )
         self.assertEqual(verified, {})
+
+    def test_acknowledgement_classifier_is_narrow(self) -> None:
+        acknowledgements = (
+            "Спасибо!",
+            "  ОК  ",
+            "понял",
+            "Thank you.",
+            "👍",
+        )
+        material_prompts = (
+            "Спасибо, исправь README",
+            "не надо ничего делать",
+            "да",
+            "готово",
+            "Ок?",
+            "почему?",
+        )
+
+        for prompt in acknowledgements:
+            with self.subTest(acknowledgement=prompt):
+                self.assertTrue(worklog._is_acknowledgement_prompt(prompt))
+        for prompt in material_prompts:
+            with self.subTest(material=prompt):
+                self.assertFalse(worklog._is_acknowledgement_prompt(prompt))
+
+    def test_acknowledgement_turn_adds_no_timeline_or_checkpoint_entry(self) -> None:
+        self.start()
+        diary = self.worklog_files()[0]
+        original = diary.read_bytes()
+
+        prompt_response = worklog.handle_event(
+            self.event(
+                "UserPromptSubmit",
+                turn_id="acknowledgement-turn",
+                prompt="Спасибо!",
+            ),
+            self.environment,
+            self.now,
+        )
+        context = prompt_response["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("acknowledgement only", context)
+        self.assertNotIn("codex-worklog-turn:", context)
+        self.assertNotIn(str(WORKLOG_SCRIPT), context)
+
+        stop_response = worklog.handle_event(
+            self.event("Stop", turn_id="acknowledgement-turn"),
+            self.environment,
+            self.now,
+        )
+        self.assertEqual(stop_response, {})
+        self.assertEqual(
+            worklog.handle_event(
+                self.event("SessionEnd", reason="other"),
+                self.environment,
+                self.now,
+            ),
+            {},
+        )
+        self.assertEqual(diary.read_bytes(), original)
+
+        state_text = self.state_files()[0].read_text(encoding="utf-8")
+        self.assertNotIn("Спасибо", state_text)
+        state = json.loads(state_text)
+        self.assertTrue(state["closed"])
+        self.assertEqual(state["end_count"], 0)
+
+    def test_prompt_with_acknowledgement_and_instruction_is_not_skipped(self) -> None:
+        self.start()
+
+        prompt_response = worklog.handle_event(
+            self.event(
+                "UserPromptSubmit",
+                turn_id="material-thanks-turn",
+                prompt="Спасибо, исправь README",
+            ),
+            self.environment,
+            self.now,
+        )
+        context = prompt_response["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("codex-worklog-turn:", context)
+        self.assertIn(str(WORKLOG_SCRIPT), context)
+
+        stop_response = worklog.handle_event(
+            self.event("Stop", turn_id="material-thanks-turn"),
+            self.environment,
+            self.now,
+        )
+        self.assertEqual(stop_response["decision"], "block")
 
     def test_stop_continuation_does_not_loop(self) -> None:
         self.start()
@@ -378,6 +507,22 @@ class WorklogHookTests(unittest.TestCase):
 
     def test_session_end_is_idempotent_until_resume(self) -> None:
         self.start()
+        first_prompt = worklog.handle_event(
+            self.event("UserPromptSubmit", turn_id="first-turn", prompt="status"),
+            self.environment,
+            self.now,
+        )
+        first_marker = re.search(
+            r"<!-- codex-worklog-turn:[0-9a-f]{16} -->",
+            first_prompt["hookSpecificOutput"]["additionalContext"],
+        )
+        self.assertIsNotNone(first_marker)
+        if first_marker is None:
+            self.fail("first turn marker is missing")
+        first_append = self.append_with_helper(
+            self.worklog_files()[0], first_marker.group(0)
+        )
+        self.assertEqual(first_append.returncode, 0)
         end_event = self.event("SessionEnd", reason="other")
 
         self.assertEqual(
@@ -395,6 +540,22 @@ class WorklogHookTests(unittest.TestCase):
             self.environment,
             self.now + timedelta(hours=1),
         )
+        second_prompt = worklog.handle_event(
+            self.event("UserPromptSubmit", turn_id="second-turn", prompt="continue"),
+            self.environment,
+            self.now + timedelta(hours=1),
+        )
+        second_marker = re.search(
+            r"<!-- codex-worklog-turn:[0-9a-f]{16} -->",
+            second_prompt["hookSpecificOutput"]["additionalContext"],
+        )
+        self.assertIsNotNone(second_marker)
+        if second_marker is None:
+            self.fail("second turn marker is missing")
+        second_append = self.append_with_helper(
+            self.worklog_files()[0], second_marker.group(0)
+        )
+        self.assertEqual(second_append.returncode, 0)
         worklog.handle_event(
             end_event,
             self.environment,
@@ -402,6 +563,71 @@ class WorklogHookTests(unittest.TestCase):
         )
         contents = diary.read_text(encoding="utf-8")
         self.assertEqual(contents.count("codex-worklog-session-end:"), 2)
+
+    def test_resume_append_preserves_all_existing_bytes_as_prefix(self) -> None:
+        self.start()
+        diary = self.worklog_files()[0]
+        first_response = worklog.handle_event(
+            self.event(
+                "UserPromptSubmit", turn_id="before-resume", prompt="first task"
+            ),
+            self.environment,
+            self.now,
+        )
+        first_marker_match = re.search(
+            r"<!-- codex-worklog-turn:[0-9a-f]{16} -->",
+            first_response["hookSpecificOutput"]["additionalContext"],
+        )
+        self.assertIsNotNone(first_marker_match)
+        if first_marker_match is None:
+            self.fail("first resume marker is missing")
+        first_marker = first_marker_match.group(0)
+        self.assertEqual(
+            self.append_with_helper(
+                diary, first_marker, title="Entry before resume"
+            ).returncode,
+            0,
+        )
+        worklog.handle_event(
+            self.event("SessionEnd", reason="other"), self.environment, self.now
+        )
+        preserved_prefix = diary.read_bytes()
+
+        worklog.handle_event(
+            self.event("SessionStart", source="resume"),
+            self.environment,
+            self.now + timedelta(hours=1),
+        )
+        second_response = worklog.handle_event(
+            self.event(
+                "UserPromptSubmit", turn_id="after-resume", prompt="second task"
+            ),
+            self.environment,
+            self.now + timedelta(hours=1),
+        )
+        second_marker_match = re.search(
+            r"<!-- codex-worklog-turn:[0-9a-f]{16} -->",
+            second_response["hookSpecificOutput"]["additionalContext"],
+        )
+        self.assertIsNotNone(second_marker_match)
+        if second_marker_match is None:
+            self.fail("second resume marker is missing")
+        second_marker = second_marker_match.group(0)
+        self.assertEqual(
+            self.append_with_helper(
+                diary, second_marker, title="Entry after resume"
+            ).returncode,
+            0,
+        )
+        final_bytes = diary.read_bytes()
+
+        self.assertTrue(final_bytes.startswith(preserved_prefix))
+        self.assertGreater(
+            final_bytes.index(second_marker.encode("utf-8")), len(preserved_prefix)
+        )
+        self.assertLess(
+            final_bytes.index(first_marker.encode("utf-8")), len(preserved_prefix)
+        )
 
     def test_session_end_early_exit_paths_are_safe(self) -> None:
         self.assertEqual(
@@ -421,6 +647,11 @@ class WorklogHookTests(unittest.TestCase):
 
     def test_existing_session_end_marker_is_not_duplicated(self) -> None:
         self.start()
+        worklog.handle_event(
+            self.event("UserPromptSubmit", turn_id="material-turn", prompt="status"),
+            self.environment,
+            self.now,
+        )
         diary = self.worklog_files()[0]
         with diary.open("a", encoding="utf-8", newline="\n") as stream:
             stream.write("\n<!-- codex-worklog-session-end:1 -->\n")
@@ -454,9 +685,7 @@ class WorklogHookTests(unittest.TestCase):
             with self.subTest(value=value):
                 environment = {**self.environment, "CODEX_WORKLOG_DIR": value}
                 response = worklog.handle_event(
-                    self.event(
-                        "SessionStart", f"session-{repr(value)}", source="startup"
-                    ),
+                    self.event("SessionStart", f"session-{value!r}", source="startup"),
                     environment,
                     self.now,
                 )
@@ -584,6 +813,14 @@ class WorklogHookTests(unittest.TestCase):
             ("[]\n", "must contain a JSON object"),
             ('{"closed": null}\n', "invalid closed flag"),
             ('{"last_turn_token": "bad"}\n', "invalid last_turn_token"),
+            (
+                '{"last_turn_requires_entry": "yes"}\n',
+                "invalid last_turn_requires_entry flag",
+            ),
+            (
+                '{"material_since_checkpoint": null}\n',
+                "invalid material_since_checkpoint flag",
+            ),
             ('{"previous_worklog_path": 7}\n', "invalid previous worklog path"),
             (" " * (worklog.MAX_STATE_BYTES + 1), "too large"),
             (b"{\xff}".decode("latin1"), "unable to inspect regular file"),
@@ -732,6 +969,62 @@ class WorklogHookTests(unittest.TestCase):
         self.assertFalse(self.plugin_data.exists())
         self.assertEqual(self.worklog_files(), [])
 
+    def test_append_helper_rejects_unsafe_or_malformed_requests(self) -> None:
+        self.start()
+        diary = self.worklog_files()[0]
+        marker = worklog._marker(worklog._token("append-validation-turn"))
+        outside = self.root / "outside.md"
+        outside.write_text("keep\n", encoding="utf-8")
+        base = self.append_payload(diary, marker)
+        cases: list[tuple[dict[str, object], str]] = []
+
+        missing = dict(base)
+        missing.pop("next")
+        cases.append((missing, "wrong schema"))
+        unexpected = {**base, "prompt": "must not be persisted"}
+        cases.append((unexpected, "unexpected fields: prompt"))
+        cases.append(({**base, "marker": "not-a-turn-marker"}, "marker is invalid"))
+        cases.append(
+            ({**base, "context": "first line\nsecond line"}, "single safe line")
+        )
+        cases.append(
+            (
+                {**base, "decisions": "<!-- codex-worklog-session-end:9 -->"},
+                "reserved marker",
+            )
+        )
+        cases.append(
+            (
+                {**base, "worklog_path": str(outside)},
+                "escapes the session working directory",
+            )
+        )
+        cases.append(({**base, "worklog_path": ".dev-diary/log.md"}, "worklog_path"))
+
+        original = diary.read_bytes()
+        for payload, expected in cases:
+            with self.subTest(expected=expected):
+                completed = self.run_cli(json.dumps(payload), arguments=("append",))
+                self.assertEqual(completed.returncode, 2)
+                self.assertEqual(completed.stdout, "")
+                self.assertIn(expected, completed.stderr)
+                self.assertNotIn("must not be persisted", completed.stderr)
+                self.assertEqual(diary.read_bytes(), original)
+        self.assertEqual(outside.read_text(encoding="utf-8"), "keep\n")
+
+    def test_append_helper_bounds_input_and_rejects_unknown_commands(self) -> None:
+        oversized = " " * (worklog.MAX_APPEND_INPUT_BYTES + 1)
+
+        completed = self.run_cli(oversized, arguments=("append",))
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("append request is too large", completed.stderr)
+        self.assertEqual(completed.stdout, "")
+
+        unknown = self.run_cli("{}", arguments=("unknown",))
+        self.assertEqual(unknown.returncode, 2)
+        self.assertEqual(unknown.stdout, "")
+        self.assertIn("unknown command", unknown.stderr)
+
     def test_cli_rejects_invalid_json_and_non_object_input(self) -> None:
         for input_text in ("not-json", "[]"):
             with self.subTest(input_text=input_text):
@@ -768,7 +1061,7 @@ class WorklogHookTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0)
         self.assertNotIn("systemMessage", json.loads(completed.stdout))
         self.assertTrue((self.workspace / "relative-plugin-data/sessions").is_dir())
-        diary = sorted(self.workspace.glob(".dev-diary/**/*.md"))[0]
+        diary = min(self.workspace.glob(".dev-diary/**/*.md"))
         self.assertIn("- Model: `unknown`", diary.read_text(encoding="utf-8"))
 
     def test_nonexistent_workspace_fails_visibly(self) -> None:

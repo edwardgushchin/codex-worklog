@@ -35,6 +35,10 @@ Changes must preserve these defaults unless a reviewed proposal explicitly repla
 
 - worklogs live under the original session `cwd`;
 - each Codex session has its own append-only Markdown file;
+- material entries use the bundled fixed-schema append helper rather than a
+  general-purpose file edit;
+- acknowledgement-only prompts create no timeline entry, while any additional
+  content remains material;
 - prompts, transcripts, tool inputs, and tool output are not copied;
 - `PLUGIN_DATA` contains only minimal session metadata and hashed identifiers;
 - context recovery reads a small relevant history and verifies mutable state;
