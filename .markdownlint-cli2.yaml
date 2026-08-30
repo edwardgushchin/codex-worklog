@@ -6,6 +6,9 @@ config:
   # README branding and GitHub's pull request template intentionally start
   # with HTML or an H2 instead of a document H1.
   first-line-heading: false
+  # Changelog sections intentionally reuse Added/Changed/Fixed across releases.
+  no-duplicate-heading:
+    siblings_only: true
 
 globs:
   - "**/*.md"

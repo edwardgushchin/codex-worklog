@@ -61,12 +61,12 @@ python3 scripts/validate_repository.py
 
 | Layer | Result |
 | --- | --- |
-| Native tests | 64 of 64 passed with warnings promoted to errors; the repository contract validated all 40 required files. |
+| Native tests | 64 of 64 passed with warnings promoted to errors; the repository contract validated all 42 required files. |
 | Runtime coverage | 91% branch-aware coverage for the dependency-free hook runtime, including helper and hook subprocesses. |
-| Python compatibility | The same 64 tests and 40-file contract passed from network-disabled, read-only Python 3.10.21 and 3.14.7 containers. |
+| Python compatibility | The same 64 tests and 42-file contract passed from network-disabled, read-only Python 3.10.21 and 3.14.7 containers. |
 | Official Codex validators | The current `plugin-creator` and `skill-creator` validators passed, and the marketplace name resolved to `codex-worklog`. |
 | Python quality | Ruff 0.16.5 lint and format checks, strict mypy, and Bandit completed with no findings. |
-| Repository and prose | Markdownlint-cli2 0.23.2 with markdownlint 0.41.1 checked 17 files with zero errors; codespell and local-link validation passed. |
+| Repository and prose | Markdownlint-cli2 0.23.2 with markdownlint 0.41.1 checked 19 files with zero errors; codespell and local-link validation passed. |
 | Secrets and assets | Detect-secrets returned zero candidates after generated tool caches were excluded. Guarded SVG parsing and the unsafe-SVG mutation test passed. |
 | GitHub automation | Workflow files are byte-unchanged from the earlier actionlint/schema/pedantic-zizmor pass. The current repository validator reran immutable action-SHA and Dependabot checks; yamllint completed without errors. |
 | Isolated installation | A clean local marketplace add and plugin install succeeded under an isolated `CODEX_HOME`; the installed files matched the source plugin byte-for-byte. |

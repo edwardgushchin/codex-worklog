@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Documented the project mission, measurable success criteria, product
+  boundaries, and external-audit standard.
+- Added a sanitized worklog that demonstrates material entries, checkpoints,
+  resume ordering, context recovery, and acknowledgement omission.
+
 ### Changed
 
 - Routed material turn entries through one bounded append helper instead of a

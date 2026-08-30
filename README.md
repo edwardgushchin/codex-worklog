@@ -93,9 +93,11 @@ An entry looks like this:
 <!-- codex-worklog-turn:0123456789abcdef -->
 ```
 
-See [Architecture](docs/ARCHITECTURE.md), [Threat model](docs/THREAT_MODEL.md),
-and [Commissioning report](docs/COMMISSIONING.md) for the complete contract and
-acceptance evidence.
+See the [Project goal](docs/PROJECT_GOAL.md),
+[sanitized worklog example](examples/EXAMPLE_WORKLOG.md),
+[Architecture](docs/ARCHITECTURE.md), [Threat model](docs/THREAT_MODEL.md), and
+[Commissioning report](docs/COMMISSIONING.md) for the intended outcome,
+complete contract, and acceptance evidence.
 
 ## Requirements
 
