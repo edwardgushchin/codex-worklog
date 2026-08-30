@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="./plugins/codex-worklog/assets/logo.svg" alt="Codex Worklog" width="620">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./plugins/codex-worklog/assets/logo-dark.svg">
+    <img src="./plugins/codex-worklog/assets/logo.svg" alt="Codex Worklog" width="620">
+  </picture>
 </p>
 
 <h3 align="center">Локальный смысловой дневник для любой задачи Codex.</h3>
@@ -12,7 +15,7 @@
 
 ## О проекте
 
-Codex Worklog — локальный плагин для кодовых и некодовых проектов. Он создаёт append-only Markdown-дневник в рабочем каталоге, из которого запущена задача Codex:
+Codex Worklog — локальный плагин для любых проектов. Он создаёт append-only Markdown-дневник в рабочем каталоге, из которого запущена задача Codex:
 
 ```text
 <session cwd>/.dev-diary/YYYY/MM/YYYY-MM-DD--HHMMSS--<session>.md

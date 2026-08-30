@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="./plugins/codex-worklog/assets/logo.svg" alt="Codex Worklog" width="620">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./plugins/codex-worklog/assets/logo-dark.svg">
+    <img src="./plugins/codex-worklog/assets/logo.svg" alt="Codex Worklog" width="620">
+  </picture>
 </p>
 
 <h3 align="center">A local semantic worklog for every Codex task.</h3>
@@ -33,7 +36,7 @@
 
 ## About
 
-Codex Worklog is a local Codex plugin for coding and non-coding projects. It creates an append-only Markdown worklog inside the working directory from which the Codex task starts:
+Codex Worklog is a local Codex plugin for any project. It creates an append-only Markdown worklog inside the working directory from which the Codex task starts:
 
 ```text
 <session cwd>/.dev-diary/YYYY/MM/YYYY-MM-DD--HHMMSS--<session>.md
