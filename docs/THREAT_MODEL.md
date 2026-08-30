@@ -26,11 +26,11 @@ Codex Worklog writes model-authored Markdown into a workspace and keeps minimal 
 |---|---|
 | Raw prompts or transcripts are retained | The runtime ignores `prompt` and `transcript_path` content and stores neither. Tests use a canary secret to verify non-persistence. |
 | Tool output contains credentials | Tool hooks are not used for capture; agent instructions explicitly prohibit copying full output or secrets. |
-| `cwd` or configuration escapes the workspace | Worklog paths must be relative to the event `cwd`; `..`, absolute overrides, control characters, and unsafe restored paths are rejected. |
-| A workspace symlink redirects writes | Every existing worklog path component is checked and symbolic links are rejected. |
-| Tampered `PLUGIN_DATA` redirects SessionEnd | Restored worklog paths are validated against the current event `cwd` before reads or appends. |
+| `cwd` or configuration escapes the workspace | Worklog paths must be portable and relative to the event `cwd`; `..`, absolute or Windows-drive overrides, control characters, and unsafe restored paths are rejected. |
+| A workspace link redirects reads or writes | Symbolic links are rejected, worklog and state files must be regular files with one hard link, and opened-file identity is checked before runtime reads or appends. |
+| Tampered `PLUGIN_DATA` redirects SessionEnd | Restored worklog paths and stored workspace identity are validated against the current event `cwd` before reads or appends; malformed or oversized state fails visibly. |
 | Shell metacharacters in the installed path execute code | `PLUGIN_ROOT` is quoted in Unix and Windows hook commands. Runtime paths are passed as one interpreter argument. |
-| A malicious path injects model instructions | Paths are flattened to one line and Markdown backticks are removed before inclusion in model-visible context. |
+| A malicious path injects model instructions | Unsafe workspace/worklog paths fail closed. Other model-visible values have control and format characters removed and are length bounded. Previous-session pointers accept only recognized regular worklogs. |
 | A missing turn entry causes an infinite loop | Strict mode allows one continuation and honors `stop_hook_active`; the second miss becomes a warning. |
 | Concurrent tasks corrupt one daily file | Each session uses a distinct file derived from time and a hashed session identifier. State writes use atomic replacement. |
 | Worklogs leak through Git | The plugin never edits `.gitignore` or stages files and tells the agent not to add worklogs without explicit user intent. Users remain responsible for repository policy. |
@@ -41,6 +41,9 @@ Codex Worklog writes model-authored Markdown into a workspace and keeps minimal 
 
 - The model can still write sensitive or inaccurate semantic content despite instructions.
 - A local process with user permissions can tamper with worklogs or state.
+- A same-user process can still race model-authored file operations after the
+  hook has supplied a validated path; protection from a compromised account is
+  out of scope.
 - POSIX modes do not provide the same semantics on every filesystem or Windows host.
 - Worklogs are plaintext and are not encrypted by the plugin.
 - Hooks can be disabled, skipped, or unavailable; this is not a compliance-grade audit trail.

@@ -1,0 +1,15 @@
+config:
+  # Community documents intentionally keep prose paragraphs unwrapped.
+  line-length: false
+  # Centered logos and badges in both READMEs require small HTML blocks.
+  no-inline-html: false
+  # README branding and GitHub's pull request template intentionally start
+  # with HTML or an H2 instead of a document H1.
+  first-line-heading: false
+
+globs:
+  - "**/*.md"
+
+ignores:
+  - ".git/**"
+  - "**/__pycache__/**"

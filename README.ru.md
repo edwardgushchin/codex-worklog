@@ -39,7 +39,9 @@ Codex Worklog — локальный плагин для кодовых и не�
 
 Служебное состояние хранится в `PLUGIN_DATA` и содержит только пути, время и хешированные идентификаторы. Промпты, transcript и вывод инструментов туда не копируются.
 
-Подробности находятся в документах [Архитектура](docs/ARCHITECTURE.md) и [Модель угроз](docs/THREAT_MODEL.md).
+Подробности находятся в документах [Архитектура](docs/ARCHITECTURE.md),
+[Модель угроз](docs/THREAT_MODEL.md) и
+[Пусконаладочный отчёт](docs/COMMISSIONING.md).
 
 ## Требования
 
@@ -101,7 +103,7 @@ codex plugin marketplace remove codex-worklog
 
 | Переменная | По умолчанию | Значения |
 |---|---|---|
-| `CODEX_WORKLOG_DIR` | `.dev-diary` | Относительный путь без `..`. |
+| `CODEX_WORKLOG_DIR` | `.dev-diary` | Переносимый относительный путь без `..`, Windows drive/backslash-синтаксиса, управляющих символов и backticks. |
 | `CODEX_WORKLOG_ENFORCEMENT` | `strict` | `strict`, `advisory`, `off`. |
 
 - `strict` один раз продолжает ход, если запись пропущена.
@@ -116,6 +118,8 @@ codex plugin marketplace remove codex-worklog
 - Полные промпты, transcript, аргументы и вывод инструментов не копируются.
 - Агент обязан исключать секреты и лишние персональные данные.
 - В POSIX-системах каталоги и файлы получают права `0700` и `0600`.
+- Символические и жёсткие ссылки, состояние из другого рабочего каталога,
+  повреждённые или чрезмерно большие state-файлы отклоняются.
 - Это рабочий дневник, а не защищённый compliance-аудит: hooks можно отключить, а не все hosted tools наблюдаются локальными hooks.
 
 См. [Privacy Policy](PRIVACY.md), [Security Policy](SECURITY.md) и [модель угроз](docs/THREAT_MODEL.md).

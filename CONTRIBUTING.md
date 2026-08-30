@@ -18,10 +18,10 @@ Requirements:
 - Git;
 - a current Codex CLI for optional local marketplace smoke tests.
 
-Clone your fork and run the local checks:
+Fork the repository in GitHub, clone the fork URL shown there, and run the local checks:
 
 ```bash
-git clone https://github.com/YOUR-USER/codex-worklog.git
+git clone <your-fork-url>
 cd codex-worklog
 python3 -m unittest discover -s tests -v
 python3 scripts/validate_repository.py

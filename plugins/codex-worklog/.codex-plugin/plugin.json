@@ -35,6 +35,9 @@
     "composerIcon": "./assets/icon.svg",
     "logo": "./assets/logo.svg",
     "logoDark": "./assets/logo-dark.svg",
-    "defaultPrompt": "Recover the current task context from the workspace worklog and verify what is still true."
+    "defaultPrompt": [
+      "Recover task context from the workspace worklog and verify what is still true.",
+      "Summarize what changed, why it changed, verification, and the next safe step."
+    ]
   }
 }

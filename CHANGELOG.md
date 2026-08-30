@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- Expanded lifecycle, path-safety, state-integrity, validator, and CLI regression coverage.
+- Hardened repository validation for manifest metadata, marketplace policy, hook commands, SVG assets, local links, and immutable GitHub Action references.
+- Updated the CI matrix to exercise minimum Python 3.10 and current Python 3.14.
+
+### Fixed
+
+- Changed `interface.defaultPrompt` to the current bounded string-array schema.
+- Replaced a nonexistent CodeQL action commit with the verified `v4.37.9` commit.
+- Made the repo marketplace and validator themselves mandatory repository artifacts.
+- Removed a contributor-clone placeholder that looked like a live URL.
+
+### Security
+
+- Reject symbolic or hard-linked worklog and state files before runtime reads and appends.
+- Create private files and directories with restrictive modes from the initial filesystem operation.
+- Reject non-portable directory overrides, invalid hook paths, corrupt, oversized, or cross-workspace state, and sanitize control characters in model-visible metadata.
+- Reduced GitHub workflow token permissions and disabled checkout credential persistence.
+
 ## [0.1.0] - 2026-08-30
 
 ### Added

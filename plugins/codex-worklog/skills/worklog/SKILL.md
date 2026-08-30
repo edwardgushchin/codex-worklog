@@ -19,6 +19,9 @@ Use the workspace-local `.dev-diary/` as a compact history of Codex work. The li
 ## Maintain the log
 
 - Append; never reorder, repair, or rewrite older entries unless the user explicitly requests it.
+- Before appending, confirm the supplied path is still a regular file inside the
+  current session workspace. Refuse symbolic links, hard links, and paths whose
+  stored workspace no longer matches the session `cwd`.
 - Use the user's language.
 - Record semantic outcomes, not a transcript: what happened, when, why, changes, verification, and what remains.
 - State clearly when no material change occurred.

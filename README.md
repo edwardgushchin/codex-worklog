@@ -77,7 +77,9 @@ An entry looks like this:
 <!-- codex-worklog-turn:0123456789abcdef -->
 ```
 
-See [Architecture](docs/ARCHITECTURE.md) and [Threat model](docs/THREAT_MODEL.md) for the complete contract.
+See [Architecture](docs/ARCHITECTURE.md), [Threat model](docs/THREAT_MODEL.md),
+and [Commissioning report](docs/COMMISSIONING.md) for the complete contract and
+acceptance evidence.
 
 ## Requirements
 
@@ -145,7 +147,7 @@ Set these environment variables before starting the Codex host:
 
 | Variable | Default | Allowed values |
 |---|---|---|
-| `CODEX_WORKLOG_DIR` | `.dev-diary` | A non-empty relative path without `..`. |
+| `CODEX_WORKLOG_DIR` | `.dev-diary` | A portable relative path without `..`, Windows drive/backslash syntax, controls, or backticks. |
 | `CODEX_WORKLOG_ENFORCEMENT` | `strict` | `strict`, `advisory`, or `off`. |
 
 - `strict` asks Codex for one bounded continuation when the current turn entry is missing.
@@ -161,6 +163,8 @@ The plugin never changes project `.gitignore` files. If worklogs should remain l
 - Raw prompts, transcripts, tool inputs, and tool output are not copied.
 - Agents are instructed to redact secrets and unnecessary personal data.
 - Directories and files use `0700` and `0600` modes where POSIX permissions are available.
+- Symbolic links, multi-linked worklog/state files, cross-workspace state, and
+  malformed state are rejected instead of followed or silently replaced.
 - The worklog is not a compliance-grade audit trail: hooks can be disabled, and some hosted tool paths are not observable by local tool hooks.
 
 Read the full [Privacy Policy](PRIVACY.md), [Security Policy](SECURITY.md), and [Threat Model](docs/THREAT_MODEL.md).
@@ -182,8 +186,11 @@ Before contributing, read [CONTRIBUTING.md](CONTRIBUTING.md) and the [Code of Co
 
 - Python must be available to the Codex host.
 - A read-only or restricted `cwd` cannot contain a worklog; the hook reports that condition and does not silently redirect the diary elsewhere.
+- A `cwd` with characters that cannot be represented safely in model context is rejected instead of exposing an altered path.
 - Semantic entries are model-authored and should be reviewed before committing or sharing.
 - Context recovery deliberately reads a small, relevant history rather than loading every prior file.
+- A same-user process can still race model-authored writes after a path was
+  validated; the plugin does not claim protection from a compromised account.
 
 ## License
 

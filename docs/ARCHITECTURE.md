@@ -80,7 +80,8 @@ Properties:
 - chronological, append-only entries;
 - sortable ISO date components;
 - no raw session or turn identifier in the filename;
-- `0700` directories and `0600` files when POSIX modes are available.
+- `0700` directories and `0600` files from creation time when POSIX modes are
+  available.
 
 State path:
 
@@ -103,10 +104,20 @@ This avoids injecting every historical entry into the model context and reduces 
 
 ## Path Safety
 
-- `CODEX_WORKLOG_DIR` must be relative and cannot contain `..`, control characters, or Markdown backticks.
-- Existing symbolic links in the worklog path are rejected.
+- `CODEX_WORKLOG_DIR` must be a portable relative path and cannot contain `..`,
+  Windows drive or backslash syntax, control characters, or Markdown backticks.
+- A `cwd` or restored worklog path containing control/format characters,
+  Markdown backticks, or an unbounded model-context value fails visibly instead
+  of supplying an altered path to the agent.
+- Existing symbolic links in worklog or plugin-state paths, including the
+  state directory, are rejected.
+- Worklog and state files must be regular files with exactly one hard link.
 - Restored state is checked to ensure the worklog still resolves inside the event `cwd`.
 - A pre-existing session file must contain the expected hashed session marker.
+- Previous-session pointers consider only regular, single-link Markdown files
+  with the Codex Worklog header; unrelated files and links are ignored.
+- Corrupt, oversized, or structurally invalid state fails visibly instead of
+  being silently replaced.
 - An unsafe or missing path produces a model-visible warning; the runtime does not redirect records to another directory.
 
 ## Compatibility
