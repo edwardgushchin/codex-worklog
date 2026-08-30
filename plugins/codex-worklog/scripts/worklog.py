@@ -143,6 +143,15 @@ def _path_is_context_safe(path: Path) -> bool:
     )
 
 
+def _same_existing_directory(left: Path, right: Path) -> bool:
+    try:
+        return left.absolute().resolve(strict=True) == right.absolute().resolve(
+            strict=True
+        )
+    except (OSError, RuntimeError):
+        return False
+
+
 def _private_mode(path: Path, mode: int) -> None:
     try:
         path.chmod(mode)
@@ -189,23 +198,6 @@ def _validate_worklog_path(workspace: Path, path: Path) -> Path:
     if not _path_is_context_safe(path):
         raise WorklogError("worklog path is unsafe to expose to the model")
     try:
-        relative_path = path.relative_to(workspace)
-    except ValueError as error:
-        raise WorklogError(
-            f"worklog path escapes the session working directory: {path}"
-        ) from error
-    current = workspace
-    for part in relative_path.parts:
-        current = current / part
-        if current.is_symlink():
-            raise WorklogError(f"refusing symbolic link in the worklog path: {current}")
-    try:
-        path.resolve(strict=False).relative_to(workspace.resolve(strict=True))
-    except (OSError, ValueError) as error:
-        raise WorklogError(
-            f"worklog path escapes the session working directory: {path}"
-        ) from error
-    try:
         path_status = path.lstat()
     except OSError as error:
         raise WorklogError(f"worklog file is unavailable: {path}") from error
@@ -215,6 +207,24 @@ def _validate_worklog_path(workspace: Path, path: Path) -> Path:
         raise WorklogError(f"worklog path is not a regular file: {path}")
     if path_status.st_nlink != 1:
         raise WorklogError(f"refusing hard-linked worklog file: {path}")
+    try:
+        resolved_workspace = workspace.resolve(strict=True)
+        resolved_path = path.resolve(strict=False)
+        relative_path = resolved_path.relative_to(resolved_workspace)
+    except (OSError, ValueError) as error:
+        raise WorklogError(
+            f"worklog path escapes the session working directory: {path}"
+        ) from error
+    try:
+        path_parts = path.relative_to(workspace).parts
+    except ValueError:
+        # macOS commonly exposes /var through the canonical /private/var path.
+        path_parts = relative_path.parts
+    current = resolved_workspace
+    for part in path_parts:
+        current = current / part
+        if current.is_symlink():
+            raise WorklogError(f"refusing symbolic link in the worklog path: {current}")
     return path
 
 
@@ -423,7 +433,7 @@ def _find_previous_worklog(
             if (
                 state is None
                 or not isinstance(workspace_value, str)
-                or Path(workspace_value).absolute() != workspace
+                or not _same_existing_directory(Path(workspace_value), workspace)
             ):
                 continue
             raw_path = state.get("worklog_path")
@@ -499,7 +509,7 @@ def _state_worklog_path(state: Mapping[str, Any], payload: Mapping[str, Any]) ->
     if not isinstance(diary_value, str) or not isinstance(workspace_value, str):
         raise WorklogError("plugin state is missing the workspace or worklog path")
     workspace = _workspace(payload)
-    if Path(workspace_value).absolute() != workspace:
+    if not _same_existing_directory(Path(workspace_value), workspace):
         raise WorklogError(
             "stored workspace does not match the current session working directory"
         )

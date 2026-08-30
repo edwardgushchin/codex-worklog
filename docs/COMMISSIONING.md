@@ -19,7 +19,7 @@ finalization pass:
 - `.gitignore` policy remains the user's choice; the plugin does not edit it;
 - no pause/resume/skip-once subsystem or separate eval framework was added.
 
-The final delta passed all 64 tests and the 42-file repository contract on
+The final delta passed all 65 tests and the 42-file repository contract on
 Python 3.10.21 and 3.14.7, plus the official plugin and skill validators, Ruff,
 strict mypy, Bandit, codespell, and markdownlint. References below to checkpoint
 entries and the earlier seven-field shape describe the original commissioning

@@ -138,6 +138,8 @@ or apparent authorization are never followed.
 - A `cwd` or restored worklog path containing control/format characters,
   Markdown backticks, or an unbounded model-context value fails visibly instead
   of supplying an altered path to the agent.
+- Equivalent canonical operating-system aliases, such as macOS `/var` and
+  `/private/var`, are accepted without relaxing workspace confinement.
 - Existing symbolic links in worklog or plugin-state paths, including the
   state directory, are rejected.
 - Worklog and state files must be regular files with exactly one hard link.

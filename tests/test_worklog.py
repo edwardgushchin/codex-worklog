@@ -193,6 +193,23 @@ class WorklogHookTests(unittest.TestCase):
             Path("notes/private-log/2026/08"),
         )
 
+    @unittest.skipIf(
+        os.name == "nt", "directory symlink creation is privilege-dependent on Windows"
+    )
+    def test_workspace_root_alias_is_accepted_by_append_helper(self) -> None:
+        real_workspace = self.workspace
+        alias = self.root / "workspace-alias"
+        alias.symlink_to(real_workspace, target_is_directory=True)
+        self.workspace = alias
+        self.start()
+        diary = self.worklog_files()[0]
+        marker = worklog._marker(worklog._token("aliased-workspace-turn"))
+
+        completed = self.append_with_helper(diary, marker)
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn(marker, diary.read_text(encoding="utf-8"))
+
     def test_source_control_characters_are_sanitized_and_model_is_not_logged(
         self,
     ) -> None:

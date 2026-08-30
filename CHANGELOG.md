@@ -50,6 +50,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Replaced a nonexistent CodeQL action commit with the verified `v4.37.9` commit.
 - Made the repo marketplace and validator themselves mandatory repository artifacts.
 - Removed a contributor-clone placeholder that looked like a live URL.
+- Accept canonical workspace aliases such as macOS `/var` → `/private/var`
+  while retaining rejection of symlinked worklog components.
 
 ### Security
 
