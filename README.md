@@ -36,7 +36,7 @@
 
 ## About
 
-Codex Worklog is a local Codex plugin for any project. It creates an append-only Markdown worklog inside the working directory from which the Codex task starts:
+Codex Worklog automatically keeps a local semantic worklog for every Codex task, appending outcomes to a Markdown file in the directory where the task starts:
 
 ```text
 <session cwd>/.dev-diary/YYYY/MM/YYYY-MM-DD--HHMMSS--<session>.md

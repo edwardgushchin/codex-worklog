@@ -8,8 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- Clarified that Codex Worklog supports any project and made the README logo
-  switch to its high-contrast variant in dark mode.
+- Replaced generic project-scope wording with a concrete description of
+  automatic semantic worklogging and made the README logo switch to its
+  high-contrast variant in dark mode.
 
 ## [0.1.0] - 2026-08-30
 
