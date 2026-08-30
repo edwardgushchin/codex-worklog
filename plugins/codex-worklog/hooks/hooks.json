@@ -1,0 +1,58 @@
+{
+  "description": "Create, maintain, and verify a semantic workspace-local Codex worklog.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -B \"$PLUGIN_ROOT/scripts/worklog.py\"",
+            "commandWindows": "py -3 -B \"%PLUGIN_ROOT%\\scripts\\worklog.py\"",
+            "timeout": 5,
+            "statusMessage": "Preparing the workspace worklog",
+            "additionalContextLimit": 1800
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -B \"$PLUGIN_ROOT/scripts/worklog.py\"",
+            "commandWindows": "py -3 -B \"%PLUGIN_ROOT%\\scripts\\worklog.py\"",
+            "timeout": 5,
+            "additionalContextLimit": 1400
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -B \"$PLUGIN_ROOT/scripts/worklog.py\"",
+            "commandWindows": "py -3 -B \"%PLUGIN_ROOT%\\scripts\\worklog.py\"",
+            "timeout": 5,
+            "statusMessage": "Verifying the workspace worklog"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -B \"$PLUGIN_ROOT/scripts/worklog.py\"",
+            "commandWindows": "py -3 -B \"%PLUGIN_ROOT%\\scripts\\worklog.py\"",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  }
+}

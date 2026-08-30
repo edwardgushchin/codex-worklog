@@ -1,0 +1,136 @@
+<p align="center">
+  <img src="./plugins/codex-worklog/assets/logo.svg" alt="Codex Worklog" width="620">
+</p>
+
+<h3 align="center">Локальный смысловой дневник для любой задачи Codex.</h3>
+
+<p align="center">
+  Что изменилось, когда, почему и с какого места продолжать.
+</p>
+
+<p align="center"><a href="README.md">English</a></p>
+
+## О проекте
+
+Codex Worklog — локальный плагин для кодовых и некодовых проектов. Он создаёт append-only Markdown-дневник в рабочем каталоге, из которого запущена задача Codex:
+
+```text
+<session cwd>/.dev-diary/YYYY/MM/YYYY-MM-DD--HHMMSS--<session>.md
+```
+
+Вместо копии чата дневник содержит смысловой результат работы:
+
+- контекст и цель;
+- действия и реальные изменения;
+- решения и объяснение причин;
+- фактически выполненные проверки;
+- незавершённые пункты и следующий шаг.
+
+Проекту не нужны собственный `AGENTS.md`, Git, MCP-сервер, внешний сервис, учётная запись или API-ключ.
+
+## Как это работает
+
+| Событие | Назначение |
+|---|---|
+| `SessionStart` | Фиксирует исходный `cwd`, создаёт или открывает дневник и сообщает агенту правила восстановления контекста. |
+| `UserPromptSubmit` | Передаёт путь, формат записи и односторонне хешированный marker текущего хода. |
+| `Stop` | Проверяет marker и при пропущенной записи даёт Codex одно ограниченное продолжение. |
+| `SessionEnd` | Добавляет идемпотентную контрольную точку завершения сессии. |
+
+Служебное состояние хранится в `PLUGIN_DATA` и содержит только пути, время и хешированные идентификаторы. Промпты, transcript и вывод инструментов туда не копируются.
+
+Подробности находятся в документах [Архитектура](docs/ARCHITECTURE.md) и [Модель угроз](docs/THREAT_MODEL.md).
+
+## Требования
+
+- Codex Desktop или Codex CLI с поддержкой plugins и hooks.
+- Python 3.10 или новее:
+  - `python3` в Linux и macOS;
+  - launcher `py -3` в Windows.
+- Разрешение Codex на запись в рабочий каталог задачи.
+
+## Установка
+
+Из GitHub:
+
+```bash
+codex plugin marketplace add edwardgushchin/codex-worklog --ref main
+codex plugin add codex-worklog@codex-worklog
+```
+
+После установки запустите новую задачу и подтвердите доверие hooks. Пока пользователь не доверит их определению, Codex не будет их выполнять.
+
+Из локального клона:
+
+```bash
+git clone https://github.com/edwardgushchin/codex-worklog.git
+codex plugin marketplace add /absolute/path/to/codex-worklog
+codex plugin add codex-worklog@codex-worklog
+```
+
+Обновление:
+
+```bash
+codex plugin marketplace upgrade codex-worklog
+codex plugin add codex-worklog@codex-worklog
+```
+
+Удаление:
+
+```bash
+codex plugin remove codex-worklog@codex-worklog
+codex plugin marketplace remove codex-worklog
+```
+
+Существующие `.dev-diary/` при удалении плагина сохраняются.
+
+## Восстановление контекста
+
+При старте Codex узнаёт, что дневник можно использовать как источник прежнего контекста. После возобновления, compaction или при неясности агент должен:
+
+1. прочитать хвост текущей сессии;
+2. при реальном пробеле открыть последнюю релевантную предыдущую запись;
+3. извлечь решения, доказательства, блокировки и следующие шаги;
+4. заново проверить изменяемое состояние файлов, Git, служб и внешних систем.
+
+Навык `worklog` выполняет тот же сценарий по прямой просьбе пользователя. Дневник считается исторической заметкой, а не гарантированно актуальным состоянием.
+
+## Настройка
+
+Переменные задаются до запуска Codex:
+
+| Переменная | По умолчанию | Значения |
+|---|---|---|
+| `CODEX_WORKLOG_DIR` | `.dev-diary` | Относительный путь без `..`. |
+| `CODEX_WORKLOG_ENFORCEMENT` | `strict` | `strict`, `advisory`, `off`. |
+
+- `strict` один раз продолжает ход, если запись пропущена.
+- `advisory` только показывает предупреждение.
+- `off` полностью отключает создание дневника и состояния.
+
+Плагин не меняет `.gitignore`. Добавляйте дневник в Git только осознанно; для локального режима можно один раз использовать уже настроенный глобальный Git excludes-файл.
+
+## Приватность и безопасность
+
+- Сетевых запросов и телеметрии нет.
+- Полные промпты, transcript, аргументы и вывод инструментов не копируются.
+- Агент обязан исключать секреты и лишние персональные данные.
+- В POSIX-системах каталоги и файлы получают права `0700` и `0600`.
+- Это рабочий дневник, а не защищённый compliance-аудит: hooks можно отключить, а не все hosted tools наблюдаются локальными hooks.
+
+См. [Privacy Policy](PRIVACY.md), [Security Policy](SECURITY.md) и [модель угроз](docs/THREAT_MODEL.md).
+
+## Разработка
+
+Production-зависимостей нет:
+
+```bash
+python3 -m unittest discover -s tests -v
+python3 scripts/validate_repository.py
+```
+
+Перед вкладом прочитайте [CONTRIBUTING.md](CONTRIBUTING.md) и [Code of Conduct](CODE_OF_CONDUCT.md). Правила выпуска описаны в [RELEASING.md](RELEASING.md).
+
+## Лицензия
+
+Проект распространяется по [MIT License](LICENSE).

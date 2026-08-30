@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Usage questions and troubleshooting
+    url: https://github.com/edwardgushchin/codex-worklog/discussions
+    about: Ask for installation, configuration, or workflow help.
+  - name: Security vulnerability
+    url: https://github.com/edwardgushchin/codex-worklog/security/advisories/new
+    about: Report suspected vulnerabilities privately. Do not open a public issue.
+  - name: Documentation
+    url: https://github.com/edwardgushchin/codex-worklog#readme
+    about: Read installation, context recovery, privacy, and troubleshooting guidance.

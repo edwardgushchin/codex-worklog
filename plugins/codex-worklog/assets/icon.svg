@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title id="title">Codex Worklog icon</title>
+  <rect width="64" height="64" rx="14" fill="#2563EB"/>
+  <path d="M18 14h22l8 8v28H18z" fill="#fff" opacity=".96"/>
+  <path d="M40 14v10h8" fill="none" stroke="#93C5FD" stroke-width="4" stroke-linejoin="round"/>
+  <path d="M25 30h16M25 37h16M25 44h11" fill="none" stroke="#2563EB" stroke-width="3" stroke-linecap="round"/>
+</svg>

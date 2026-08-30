@@ -1,0 +1,107 @@
+name: Bug report
+description: Report a reproducible Codex Worklog defect.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a problem. Search existing issues first. Never paste secrets, private worklogs, prompts, or transcripts.
+
+  - type: checkboxes
+    id: prerequisites
+    attributes:
+      label: Prerequisites
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
+        - label: This is not a security vulnerability; security issues use private reporting.
+          required: true
+        - label: I removed credentials, private paths, worklog contents, and personal data from this report.
+          required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Installation or marketplace
+        - SessionStart or context recovery
+        - UserPromptSubmit
+        - Stop verification
+        - SessionEnd
+        - File layout or permissions
+        - Windows compatibility
+        - macOS compatibility
+        - Linux compatibility
+        - Skill or documentation
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: plugin-version
+    attributes:
+      label: Plugin version
+      description: Provide the exact version or commit SHA.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include OS, Codex version and surface, Python version, enforcement mode, and whether the workspace is Git-backed.
+      placeholder: |
+        OS: Ubuntu 26.04 x86_64
+        Codex: CLI 0.x
+        Python: 3.13.x
+        Mode: strict
+        Workspace: non-Git directory
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Problem description
+      description: Explain what happened and its impact.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Use a temporary directory and synthetic data where possible.
+      placeholder: |
+        1. Install the plugin from ...
+        2. Start Codex in an empty temporary directory.
+        3. Submit ...
+        4. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Redacted diagnostics
+      description: Include the exact error only after removing secrets, private paths, prompts, and worklog content.
+      render: shell
+
+  - type: checkboxes
+    id: conduct
+    attributes:
+      label: Code of Conduct
+      options:
+        - label: I agree to follow the project's Code of Conduct.
+          required: true

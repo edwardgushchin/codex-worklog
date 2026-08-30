@@ -1,0 +1,10 @@
+# Default ownership for repository changes.
+* @edwardgushchin
+
+# Runtime, lifecycle, marketplace, and security changes require maintainer review.
+/.agents/ @edwardgushchin
+/.github/ @edwardgushchin
+/plugins/codex-worklog/hooks/ @edwardgushchin
+/plugins/codex-worklog/scripts/ @edwardgushchin
+/SECURITY.md @edwardgushchin
+/docs/THREAT_MODEL.md @edwardgushchin

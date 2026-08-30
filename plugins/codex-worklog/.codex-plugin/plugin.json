@@ -1,0 +1,40 @@
+{
+  "name": "codex-worklog",
+  "version": "0.1.0",
+  "description": "Keep an append-only semantic worklog in every Codex workspace and use it to recover context when needed.",
+  "author": {
+    "name": "Eduard Gushchin",
+    "email": "eduardgushchin@yandex.ru",
+    "url": "https://github.com/edwardgushchin"
+  },
+  "homepage": "https://github.com/edwardgushchin/codex-worklog#readme",
+  "repository": "https://github.com/edwardgushchin/codex-worklog",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "diary",
+    "worklog",
+    "context",
+    "productivity"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Codex Worklog",
+    "shortDescription": "Local what, when, and why for every task",
+    "longDescription": "Maintains an append-only semantic worklog in the Codex session working directory and teaches the agent to use recent entries for careful context recovery.",
+    "developerName": "Eduard Gushchin",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/edwardgushchin/codex-worklog",
+    "privacyPolicyURL": "https://github.com/edwardgushchin/codex-worklog/blob/main/PRIVACY.md",
+    "termsOfServiceURL": "https://github.com/edwardgushchin/codex-worklog/blob/main/TERMS.md",
+    "brandColor": "#2563EB",
+    "composerIcon": "./assets/icon.svg",
+    "logo": "./assets/logo.svg",
+    "logoDark": "./assets/logo-dark.svg",
+    "defaultPrompt": "Recover the current task context from the workspace worklog and verify what is still true."
+  }
+}
