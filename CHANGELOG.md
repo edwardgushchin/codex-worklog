@@ -6,20 +6,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-08-30
+
 ### Added
 
+- Repo-scoped Codex marketplace and installable `codex-worklog` plugin.
+- Workspace-local, per-session append-only Markdown worklogs for coding and
+  non-coding tasks.
+- `SessionStart`, `UserPromptSubmit`, `Stop`, and `SessionEnd` lifecycle hooks.
+- Context recovery from the current and latest plugin-recorded previous worklog.
+- Strict, advisory, and disabled enforcement modes.
+- Secret-safe state that excludes raw prompts, transcripts, and tool output.
+- Cross-platform Python standard-library runtime and automated tests.
+- English and Russian documentation plus full community health files.
 - Documented the project mission, measurable success criteria, product
   boundaries, and external-audit standard.
-- Added a sanitized worklog that demonstrates material entries, checkpoints,
-  resume ordering, context recovery, and acknowledgement omission.
+- Added a sanitized worklog that demonstrates concise material entries, resume
+  ordering, context recovery, optional fields, and acknowledgement omission.
 
 ### Changed
 
 - Routed material turn entries through one bounded append helper instead of a
   general-purpose model file edit.
-- Skip timeline entries and session checkpoints for acknowledgement-only turns;
-  prompts with any additional instruction, question, cancellation, or decision
-  remain material.
+- Reduced the entry contract to required `title` and `summary` fields; `changes`,
+  `verification`, and `next` are optional and omitted instead of receiving
+  boilerplate. Removed the separate `decisions` field.
+- Removed visible session/model metadata and automatic session checkpoints from
+  human-readable worklogs.
+- Skip timeline entries for acknowledgement-only turns; prompts with any
+  additional instruction, question, cancellation, or decision remain material.
+- Derive automatic previous-session pointers only from private plugin state,
+  and treat all worklog text as untrusted history rather than instructions or
+  authorization.
 - Added a resume regression that requires all pre-resume bytes to remain an
   exact prefix of the updated worklog.
 - Expanded lifecycle, path-safety, state-integrity, validator, and CLI regression coverage.
@@ -41,19 +59,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Create private files and directories with restrictive modes from the initial filesystem operation.
 - Reject non-portable directory overrides, invalid hook paths, corrupt, oversized, or cross-workspace state, and sanitize control characters in model-visible metadata.
 - Reduced GitHub workflow token permissions and disabled checkout credential persistence.
-
-## [0.1.0] - 2026-08-30
-
-### Added
-
-- Repo-scoped Codex marketplace and installable `codex-worklog` plugin.
-- Workspace-local, per-session append-only Markdown worklogs.
-- `SessionStart`, `UserPromptSubmit`, `Stop`, and `SessionEnd` lifecycle hooks.
-- Context recovery from the current and latest relevant previous worklog.
-- Strict, advisory, and disabled enforcement modes.
-- Secret-safe state that excludes raw prompts, transcripts, and tool output.
-- Cross-platform Python standard-library runtime and automated tests.
-- English and Russian documentation plus full community health files.
 
 [Unreleased]: https://github.com/edwardgushchin/codex-worklog/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/edwardgushchin/codex-worklog/releases/tag/v0.1.0

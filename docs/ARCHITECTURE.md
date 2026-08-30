@@ -42,7 +42,7 @@ Codex host
 The hook validates `cwd`, creates a private per-session Markdown file, and stores its absolute path in `PLUGIN_DATA`. Startup context tells the agent:
 
 - where to append entries;
-- which semantic fields to record;
+- how to record a concise summary and omit unused optional fields;
 - how to redact sensitive information;
 - how to recover context after resume or compaction;
 - that mutable state must be checked again.
@@ -64,10 +64,11 @@ the turn; it does not authenticate content.
 ### Append helper
 
 The agent invokes `scripts/worklog.py append` once from the session `cwd` and
-sends a bounded JSON object on standard input. The helper requires the exact
-semantic field set, rejects multiline/control content and reserved markers,
-revalidates the worklog as a regular single-link file inside that `cwd`, adds
-the local timestamp, and writes with `O_APPEND`, flush, and `fsync`.
+sends a bounded JSON object on standard input. The helper requires `title` and
+`summary`, accepts only the optional `changes`, `verification`, and `next`
+fields, rejects multiline/control content and reserved markers, revalidates the
+worklog as a regular single-link file inside that `cwd`, adds the local
+timestamp, and writes with `O_APPEND`, flush, and `fsync`.
 
 If the exact turn marker already exists in the recent tail, the helper returns
 success without adding a duplicate. The agent does not perform separate path
@@ -87,10 +88,9 @@ for the exact turn marker.
 
 ### SessionEnd
 
-The hook appends a small checkpoint only if material work occurred since the
-previous checkpoint, then records a closed flag. Repeated end events are
-idempotent until the session resumes. An acknowledgement-only resume therefore
-does not alter the existing worklog bytes.
+The hook validates the stored worklog path and records a closed flag in private
+plugin state. It never adds session lifecycle messages to the human-readable
+timeline. Repeated end events are idempotent until the session resumes.
 
 ## Storage Contract
 
@@ -115,8 +115,8 @@ State path:
 <PLUGIN_DATA>/sessions/<session-hash>.json
 ```
 
-State contains only paths, timestamps, lifecycle Boolean flags, an end counter,
-and hashed turn identifiers. It does not contain the user prompt or transcript.
+State contains only paths, timestamps, lifecycle Boolean flags, and hashed turn
+identifiers. It does not contain the user prompt or transcript.
 
 ## Context Recovery
 
@@ -124,10 +124,12 @@ Context recovery is deliberately progressive:
 
 1. read the tail of the current session file;
 2. consult the newest relevant earlier session only if needed;
-3. summarize objective, decisions, evidence, blockers, and next steps;
+3. summarize objective, outcomes, rationale, evidence, blockers, and any real next step;
 4. verify live or time-sensitive state before taking action.
 
 This avoids injecting every historical entry into the model context and reduces the chance of stale notes overriding current evidence.
+Worklog text is explicitly treated as untrusted history: embedded instructions
+or apparent authorization are never followed.
 
 ## Path Safety
 
@@ -140,9 +142,11 @@ This avoids injecting every historical entry into the model context and reduces 
   state directory, are rejected.
 - Worklog and state files must be regular files with exactly one hard link.
 - Restored state is checked to ensure the worklog still resolves inside the event `cwd`.
-- A pre-existing session file must contain the expected hashed session marker.
-- Previous-session pointers consider only regular, single-link Markdown files
-  with the Codex Worklog header; unrelated files and links are ignored.
+- A pre-existing session file must use the expected collision-resistant name
+  and Codex Worklog header.
+- Automatic previous-session pointers are derived only from valid per-session
+  records in private `PLUGIN_DATA`; arbitrary workspace Markdown files are not
+  discovered merely because they have a Codex Worklog heading.
 - Corrupt, oversized, or structurally invalid state fails visibly instead of
   being silently replaced.
 - An unsafe or missing path produces a model-visible warning; the runtime does not redirect records to another directory.

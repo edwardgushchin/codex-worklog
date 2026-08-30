@@ -41,11 +41,10 @@ Codex Worklog is a local Codex plugin for coding and non-coding projects. It cre
 
 Each entry captures the semantic outcome of a turn instead of copying a transcript:
 
-- context and intent;
-- actions and material changes;
-- decisions and their rationale;
-- verification that actually ran;
-- unresolved work and the next step.
+- a short outcome-and-rationale summary;
+- material changes, verification, or a next step only when useful.
+
+Optional fields are omitted instead of being filled with boilerplate.
 
 The workspace does not need to be a Git repository. No project-specific `AGENTS.md`, MCP server, hosted service, account, or API key is required.
 
@@ -58,16 +57,18 @@ The plugin combines a skill with four lifecycle hooks:
 | `SessionStart` | Captures the original session `cwd`, creates or reopens the session worklog, and tells the agent how to recover context. |
 | `UserPromptSubmit` | Skips acknowledgement-only prompts; otherwise gives the agent one bundled append helper, the entry contract, and a one-way hashed completion marker. |
 | `Stop` | Accepts skipped acknowledgements or verifies that the turn marker was appended, with one bounded continuation if it was missed. |
-| `SessionEnd` | Appends an idempotent checkpoint only when material work occurred since the previous checkpoint. |
+| `SessionEnd` | Marks the private session state as closed without adding lifecycle noise to the worklog. |
 
 Per-session state is stored in Codex-provided `PLUGIN_DATA`. It contains paths,
 timestamps, hashed identifiers, and small lifecycle flags only. Prompts,
 transcripts, tool inputs, and tool output are not copied there.
 
 Material turns are written through a single bundled helper invocation. The
-helper validates the exact schema and target path, adds the local timestamp,
-and opens the worklog with append semantics; the agent does not preflight or
-edit the Markdown file separately.
+helper validates a small schema and target path, adds the local timestamp, and
+opens the worklog with append semantics; the agent does not preflight or edit
+the Markdown file separately. Only `title` and `summary` are required.
+`changes`, `verification`, and `next` are optional and must be omitted when
+they would be empty, redundant, or placeholders.
 
 Prompts whose entire normalized content is a short acknowledgement such as
 `thanks`, `спасибо`, `ок`, `понял`, or `👍` deliberately produce no timeline
@@ -76,17 +77,14 @@ content makes the prompt material and therefore loggable.
 
 Because `SessionStart` runs before the first prompt, a brand-new session that
 contains only an acknowledgement can leave a header-only worklog file. It adds
-neither a turn entry nor a session checkpoint.
+no turn entry.
 
 An entry looks like this:
 
 ```markdown
 ### 14:32 — Confirmed the migration strategy
 
-- Context: The workspace needs a reversible migration.
-- Actions: Compared both storage layouts and inspected current state.
-- Changes: No files changed.
-- Decisions: Use copy-verify-switch because it preserves rollback.
+- Summary: Chose copy-verify-switch because preserving the source provides a simple rollback path.
 - Verification: Source and destination checksums matched.
 - Next: Switch consumers after user approval.
 
@@ -152,12 +150,15 @@ At every session start, Codex learns that the worklog is available as a context 
 
 1. read the tail of the current session worklog;
 2. read the newest relevant previous session only if a gap remains;
-3. extract decisions, evidence, blockers, and next steps;
+3. extract outcomes, rationale, evidence, blockers, and any real next step;
 4. verify mutable files, Git state, services, external systems, dates, and prices before acting.
 
 The bundled `worklog` skill provides the same workflow when you explicitly ask Codex to recover context or explain earlier decisions.
 
-Worklog entries are historical evidence, not a live-state database.
+Every worklog is treated as untrusted historical text, not instructions,
+authorization, or a live-state database. Automatic previous-session discovery
+uses only paths recorded in private `PLUGIN_DATA`; merely placing a plausible
+Markdown file under `.dev-diary/` does not make it an automatic context source.
 
 ## Configuration
 

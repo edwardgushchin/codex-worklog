@@ -4,6 +4,32 @@ This document records the local pre-release acceptance audit performed on
 2026-08-30. It is evidence for the reviewed revision, not a permanent claim
 that future Codex, Python, operating-system, or GitHub behavior is unchanged.
 
+## Final v0.1.0 delta
+
+An external review of the audited candidate led to one deliberately small
+finalization pass:
+
+- entries now require only `title` and `summary`; `changes`, `verification`,
+  and `next` are optional, and the separate `decisions` field is gone;
+- visible session/model metadata and session checkpoints were removed from the
+  human-readable file;
+- automatic previous-worklog discovery now uses only valid records in private
+  `PLUGIN_DATA`, and agents are told never to follow worklog-embedded
+  instructions or treat them as authorization;
+- `.gitignore` policy remains the user's choice; the plugin does not edit it;
+- no pause/resume/skip-once subsystem or separate eval framework was added.
+
+The final delta passed all 64 tests and the 42-file repository contract on
+Python 3.10.21 and 3.14.7, plus the official plugin and skill validators, Ruff,
+strict mypy, Bandit, codespell, and markdownlint. References below to checkpoint
+entries and the earlier seven-field shape describe the original commissioning
+run and are retained as historical evidence rather than the final file format.
+
+A final installed-copy semantic smoke added three representative boundaries:
+a coding task produced only `Summary`, `Changes`, and actual `Verification`; a
+non-coding recommendation produced one useful `Summary` with no filler; and an
+acknowledgement-only resume used no tools and left the worklog byte-identical.
+
 ## Scope
 
 The audit covers:
@@ -47,7 +73,7 @@ or change GitHub repositories, releases, branches, or status checks.
 | CW-007 | Low | The original runtime test suite had 11 tests and 77% branch-aware runtime coverage. | Expanded lifecycle, CLI, privacy, state, and path regression coverage and added validator mutation tests. |
 | CW-008 | Low | Contributor instructions contained a placeholder formatted as a live clone URL. | Replaced it with an explicit fork workflow and non-live placeholder argument. |
 | CW-009 | High | During a real resume, a general-purpose model edit inserted a new entry before an older session checkpoint. The marker still passed, so the claimed append-only chronology was false. | Replaced direct model edits with one bundled fixed-schema helper that revalidates the path and writes with `O_APPEND`; a regression requires all old bytes to remain an exact prefix after resume. |
-| CW-010 | Medium | A pure acknowledgement incurred a full strict logging continuation, multiple file tools, and a semantically empty entry. | Added a narrow whole-prompt acknowledgement classifier, zero-entry `Stop` handling, and conditional `SessionEnd` checkpoints. Any question, cancellation, decision, or added instruction remains material. |
+| CW-010 | Medium | A pure acknowledgement incurred a full strict logging continuation, multiple file tools, and a semantically empty entry. | Added a narrow whole-prompt acknowledgement classifier and zero-entry `Stop` handling; final v0.1.0 writes no `SessionEnd` checkpoint at all. Any question, cancellation, decision, or added instruction remains material. |
 
 ## Verification Matrix
 

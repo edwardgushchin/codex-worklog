@@ -29,7 +29,7 @@ Codex Worklog follows [Semantic Versioning](https://semver.org/). Tags use the f
 7. Register a temporary local marketplace, install the plugin, trust the reviewed hooks, and run a smoke task in a temporary directory.
 8. Confirm startup, helper append and idempotency, acknowledgement skipping,
    strict missing-marker behavior, resume prefix preservation, compaction
-   context, conditional session checkpoints, advisory mode, disabled mode, and
+   context, quiet session close, advisory mode, disabled mode, and
    uninstall behavior.
 
 ## Publish
