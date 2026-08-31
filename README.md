@@ -200,8 +200,6 @@ python3 -m unittest discover -s tests -v
 python3 scripts/validate_repository.py
 ```
 
-The repository follows the community structure used by [SDL3-CS](https://github.com/edwardgushchin/SDL3-CS): focused contribution guidance, issue forms, a pull request checklist, a code of conduct, security and support policies, release instructions, pinned CI actions, and Dependabot coverage.
-
 Before contributing, read [CONTRIBUTING.md](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md). Release maintainers should follow [RELEASING.md](RELEASING.md).
 
 ## Limitations
