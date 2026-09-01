@@ -18,6 +18,7 @@ PLUGIN = ROOT / "plugins" / "codex-worklog"
 MANIFEST = PLUGIN / ".codex-plugin" / "plugin.json"
 MARKETPLACE = ROOT / ".agents" / "plugins" / "marketplace.json"
 HOOKS = PLUGIN / "hooks" / "hooks.json"
+WORKLOG_SKILL = PLUGIN / "skills" / "worklog" / "SKILL.md"
 SEMVER = re.compile(
     r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
     r"(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)"
@@ -63,6 +64,7 @@ REQUIRED_FILES = {
     "docs/PROJECT_GOAL.md",
     "docs/THREAT_MODEL.md",
     "examples/EXAMPLE_WORKLOG.md",
+    "examples/reports/MIGRATION_VERIFICATION.md",
     "plugins/codex-worklog/.codex-plugin/plugin.json",
     "plugins/codex-worklog/assets/icon.svg",
     "plugins/codex-worklog/assets/logo-dark.svg",
@@ -136,7 +138,12 @@ def validate_manifest(errors: list[str]) -> None:
     author = manifest.get("author")
     if not isinstance(author, dict) or not _nonempty_string(author.get("name")):
         errors.append("plugin author.name must be a non-empty string")
-    if manifest.get("skills") != "./skills/" or not (PLUGIN / "skills").is_dir():
+    skills_directory = PLUGIN / "skills"
+    if (
+        manifest.get("skills") != "./skills/"
+        or not skills_directory.is_dir()
+        or skills_directory.is_symlink()
+    ):
         errors.append("plugin skills must resolve to ./skills/")
     if "hooks" in manifest:
         errors.append("hooks must use default hooks/hooks.json discovery")
@@ -279,27 +286,33 @@ def validate_hooks(errors: list[str]) -> None:
                     errors.append(
                         f"{event_name} timeout must be exactly {expected_timeout} seconds"
                     )
-                expected_context_limit = {
-                    "SessionStart": 1800,
-                    "UserPromptSubmit": 1400,
-                }.get(event_name)
-                if (
-                    expected_context_limit is not None
-                    and handler.get("additionalContextLimit") != expected_context_limit
-                ):
-                    errors.append(
-                        f"{event_name} additionalContextLimit must be exactly "
-                        f"{expected_context_limit}"
-                    )
-                if (
-                    expected_context_limit is None
-                    and "additionalContextLimit" in handler
-                ):
+                if "additionalContextLimit" in handler:
                     errors.append(
                         f"{event_name} must not declare additionalContextLimit"
                     )
                 if handler.get("async") is True:
                     errors.append(f"{event_name} must run synchronously")
+
+
+def validate_worklog_skill(errors: list[str]) -> None:
+    try:
+        text = WORKLOG_SKILL.read_text(encoding="utf-8")
+    except OSError as error:
+        errors.append(f"worklog skill is unreadable: {error}")
+        return
+    required_boundaries = (
+        "current task `cwd`",
+        "user-wide memory registries",
+        "do not use it as worklog evidence",
+        "never create, append, repair, or reorder worklog entries",
+        "report the absence instead",
+    )
+    for boundary in required_boundaries:
+        if boundary not in text:
+            errors.append(
+                "worklog skill must keep history recovery inside the current cwd "
+                f"and read-only ({boundary!r} is missing)"
+            )
 
 
 def validate_assets(errors: list[str]) -> None:
@@ -355,6 +368,7 @@ def validate_internal_links(errors: list[str]) -> None:
         "docs/ARCHITECTURE.md",
         "docs/COMMISSIONING.md",
         "docs/THREAT_MODEL.md",
+        "examples/EXAMPLE_WORKLOG.md",
     ):
         path = ROOT / relative
         if not path.is_file():
@@ -419,6 +433,8 @@ def main() -> int:
         validate_marketplace(errors)
     if HOOKS.is_file():
         validate_hooks(errors)
+    if WORKLOG_SKILL.is_file():
+        validate_worklog_skill(errors)
     validate_assets(errors)
     validate_internal_links(errors)
     validate_action_pins(errors)

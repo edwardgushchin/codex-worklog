@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This repository packages `codex-worklog`, a local Codex plugin that keeps a semantic, append-only worklog in the original session working directory and makes that history available for context recovery.
+This repository packages `codex-worklog`, a local Codex plugin whose lifecycle hooks keep a semantic, append-only worklog in the original session working directory without active-agent involvement. A focused skill exposes that history only for inspection and context recovery.
 
 ## Structure
 
@@ -10,7 +10,7 @@ This repository packages `codex-worklog`, a local Codex plugin that keeps a sema
 - `plugins/codex-worklog/.codex-plugin/plugin.json`: stable plugin identity and UI metadata.
 - `plugins/codex-worklog/hooks/hooks.json`: lifecycle hook registration.
 - `plugins/codex-worklog/scripts/worklog.py`: dependency-free runtime.
-- `plugins/codex-worklog/skills/worklog/SKILL.md`: manual inspection and context-recovery workflow.
+- `plugins/codex-worklog/skills/worklog/SKILL.md`: read-only history inspection and context-recovery workflow.
 - `tests/`: lifecycle, privacy, path-safety, and portability tests.
 - `scripts/validate_repository.py`: repository contract check.
 
@@ -23,7 +23,10 @@ This repository packages `codex-worklog`, a local Codex plugin that keeps a sema
 - Keep `hooks/hooks.json` at the default discovery path; do not add a `hooks` field to `plugin.json` unless the current validator and official Codex specification both require it.
 - Never persist raw prompts, transcripts, tool inputs, tool output, secrets, credentials, private keys, or unnecessary personal data.
 - Reject path traversal and symbolic-link redirection. Never silently write outside session `cwd` or Codex `PLUGIN_DATA`.
-- Keep Stop-hook continuation bounded by `stop_hook_active`.
+- Keep normal lifecycle writes entirely hook-owned. `SessionStart` and
+  `UserPromptSubmit` must not inject maintenance instructions, and `Stop` must
+  not create a continuation that delegates the write to the active agent.
+- Keep the exported `worklog` skill read-only and limited to requested history inspection or context recovery; it must never perform routine appends.
 - Treat worklogs as historical notes and verify mutable state before acting on them.
 - Do not modify user Codex configuration, install the plugin, publish GitHub state, or create releases unless the current request authorizes it.
 - Do not add generated `.dev-diary/`, plugin cache, bytecode, coverage, or local environment files to Git.

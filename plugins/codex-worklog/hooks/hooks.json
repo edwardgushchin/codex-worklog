@@ -10,8 +10,7 @@
             "command": "python3 -B \"$PLUGIN_ROOT/scripts/worklog.py\"",
             "commandWindows": "py -3 -B \"%PLUGIN_ROOT%\\scripts\\worklog.py\"",
             "timeout": 5,
-            "statusMessage": "Preparing the workspace worklog",
-            "additionalContextLimit": 1800
+            "statusMessage": "Preparing the workspace worklog"
           }
         ]
       }
@@ -23,8 +22,7 @@
             "type": "command",
             "command": "python3 -B \"$PLUGIN_ROOT/scripts/worklog.py\"",
             "commandWindows": "py -3 -B \"%PLUGIN_ROOT%\\scripts\\worklog.py\"",
-            "timeout": 5,
-            "additionalContextLimit": 1400
+            "timeout": 5
           }
         ]
       }
@@ -37,7 +35,7 @@
             "command": "python3 -B \"$PLUGIN_ROOT/scripts/worklog.py\"",
             "commandWindows": "py -3 -B \"%PLUGIN_ROOT%\\scripts\\worklog.py\"",
             "timeout": 5,
-            "statusMessage": "Verifying the workspace worklog"
+            "statusMessage": "Recording the completed turn"
           }
         ]
       }

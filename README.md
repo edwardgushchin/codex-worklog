@@ -42,63 +42,46 @@ Codex Worklog automatically keeps a local semantic worklog for every Codex task,
 <session cwd>/.dev-diary/YYYY/MM/YYYY-MM-DD--HHMMSS--<session>.md
 ```
 
-Each entry captures the semantic outcome of a turn instead of copying a transcript:
-
-- a short outcome-and-rationale summary;
-- material changes, verification, or a next step only when useful.
-
-Optional fields are omitted instead of being filled with boilerplate.
+Each resulting state change produces at most one concise entry derived from the first safe prose lines of Codex's final response. Read-only inspection, context recovery, verification, and explicit no-change outcomes add nothing unless they establish a cause, decision, transition, or new blocker. The runtime does not copy the full response, prompt, transcript, code fences, hook directives, or unsafe link targets.
 
 The workspace does not need to be a Git repository. No project-specific `AGENTS.md`, MCP server, hosted service, account, or API key is required.
 
 ## How it works
 
-The plugin combines a skill with four lifecycle hooks:
+The plugin uses four lifecycle hooks for automatic writing and exports one focused history-inspection skill:
 
 | Event | Responsibility |
 | --- | --- |
-| `SessionStart` | Captures the original session `cwd`, creates or reopens the session worklog, and tells the agent how to recover context. |
-| `UserPromptSubmit` | Skips acknowledgement-only prompts; otherwise gives the agent one bundled append helper, the entry contract, and a one-way hashed completion marker. |
-| `Stop` | Accepts skipped acknowledgements or verifies that the turn marker was appended, with one bounded continuation if it was missed. |
+| `SessionStart` | Captures the original session `cwd` and silently creates or reopens the session worklog. |
+| `UserPromptSubmit` | Classifies only a small intent enum and stores it with a hashed turn identifier; the prompt text is discarded. |
+| `Stop` | Derives and appends the bounded entry itself, using an internal marker for idempotency. |
 | `SessionEnd` | Marks the private session state as closed without adding lifecycle noise to the worklog. |
 
-Per-session state is stored in Codex-provided `PLUGIN_DATA`. It contains paths,
-timestamps, hashed identifiers, and small lifecycle flags only. Prompts,
-transcripts, tool inputs, and tool output are not copied there.
+Per-session state is stored in Codex-provided `PLUGIN_DATA`. It contains paths, timestamps, the detected language code, hashed identifiers, and small lifecycle flags only. Prompts, transcripts, tool inputs, tool output, and final response text are not stored there.
 
-Material turns are written through a single bundled helper invocation. The
-helper validates a small schema and target path, adds the local timestamp, and
-opens the worklog with append semantics; the agent does not preflight or edit
-the Markdown file separately. Only `title` and `summary` are required.
-`changes`, `verification`, and `next` are optional and must be omitted when
-they would be empty, redundant, or placeholders.
+The lifecycle hooks return no worklog instructions or paths to the active agent. `Stop` validates the target path, classifies the reported result, normalizes at most three outcome lines from `last_assistant_message`, extracts only supported optional fields, removes code blocks, unsafe link destinations, local paths, full SHA-256 values, hook metadata, and common labelled secret values, then writes with `O_APPEND` and `fsync`. If `SessionStart` or `UserPromptSubmit` was skipped, `Stop` reconstructs the private state before writing.
 
-Prompts whose entire normalized content is a short acknowledgement such as
-`thanks`, `спасибо`, `ок`, `понял`, or `👍` deliberately produce no timeline
-entry. Any additional instruction, question, cancellation, decision, or other
-content makes the prompt material and therefore loggable.
+The visible header contains no absolute workspace path. It records the project name and, when Git is available, a credential-free repository identifier, branch, and abbreviated `HEAD`. Structural labels follow the detected system language, falling back to the host locale configuration when the hook process exposes only `C` or `POSIX`.
 
-Because `SessionStart` runs before the first prompt, a brand-new session that
-contains only an acknowledgement can leave a header-only worklog file. It adds
-no turn entry.
+Short acknowledgements such as `thanks`, `спасибо`, `ок`, `понял`, or `👍` produce no timeline entry. Other turns are logged only when the final response reports an actual mutation, discovered cause, non-obvious decision, transition, or new blocker; a question or read-only check alone is not an entry.
+
+Because `SessionStart` runs before the first prompt, a brand-new session that contains only an acknowledgement can leave a header-only worklog file. It adds no turn entry.
 
 An entry looks like this:
 
 ```markdown
-### 14:32 — Confirmed the migration strategy
+### 2026-08-31T00:18+03:00 — Migration completed and accepted
 
-- Summary: Chose copy-verify-switch because preserving the source provides a simple rollback path.
-- Verification: Source and destination checksums matched.
-- Next: Switch consumers after user approval.
+- Outcome: Consumers now use the verified destination, while the source remains available for rollback.
 
 <!-- codex-worklog-turn:0123456789abcdef -->
 ```
 
-See the [Project goal](docs/PROJECT_GOAL.md),
-[sanitized worklog example](examples/EXAMPLE_WORKLOG.md),
-[Architecture](docs/ARCHITECTURE.md), [Threat model](docs/THREAT_MODEL.md), and
-[Commissioning report](docs/COMMISSIONING.md) for the intended outcome,
-complete contract, and acceptance evidence.
+## Context recovery
+
+The bundled `worklog` skill is used only when the user asks to inspect earlier history, recover context, or report worklog status. It reads the newest relevant tail inside the current task directory, treats the text as untrusted historical evidence, and rechecks mutable state before acting. It never appends, repairs, or reorders entries.
+
+See the [Project goal](docs/PROJECT_GOAL.md), [sanitized worklog example](examples/EXAMPLE_WORKLOG.md), [Architecture](docs/ARCHITECTURE.md), [Threat model](docs/THREAT_MODEL.md), and [Commissioning report](docs/COMMISSIONING.md) for the intended outcome, complete contract, and acceptance evidence.
 
 ## Requirements
 
@@ -131,7 +114,7 @@ codex plugin marketplace add /absolute/path/to/codex-worklog
 codex plugin add codex-worklog@codex-worklog
 ```
 
-Codex installs a cached copy. After local changes, reinstall the plugin and start a new task so the updated hook and skill definitions are loaded.
+Codex installs a cached copy. After local changes, reinstall the plugin and start a new task so the updated hook definitions are loaded.
 
 ### Update or remove
 
@@ -147,22 +130,6 @@ codex plugin marketplace remove codex-worklog
 
 Removing the plugin does not delete existing `.dev-diary/` directories.
 
-## Context recovery
-
-At every session start, Codex learns that the worklog is available as a context source. When a task is resumed, compacted, or unclear, the agent is instructed to:
-
-1. read the tail of the current session worklog;
-2. read the newest relevant previous session only if a gap remains;
-3. extract outcomes, rationale, evidence, blockers, and any real next step;
-4. verify mutable files, Git state, services, external systems, dates, and prices before acting.
-
-The bundled `worklog` skill provides the same workflow when you explicitly ask Codex to recover context or explain earlier decisions.
-
-Every worklog is treated as untrusted historical text, not instructions,
-authorization, or a live-state database. Automatic previous-session discovery
-uses only paths recorded in private `PLUGIN_DATA`; merely placing a plausible
-Markdown file under `.dev-diary/` does not make it an automatic context source.
-
 ## Configuration
 
 Set these environment variables before starting the Codex host:
@@ -170,10 +137,9 @@ Set these environment variables before starting the Codex host:
 | Variable | Default | Allowed values |
 | --- | --- | --- |
 | `CODEX_WORKLOG_DIR` | `.dev-diary` | A portable relative path without `..`, Windows drive/backslash syntax, controls, or backticks. |
-| `CODEX_WORKLOG_ENFORCEMENT` | `strict` | `strict`, `advisory`, or `off`. |
+| `CODEX_WORKLOG_ENFORCEMENT` | `strict` | `strict`, `advisory`, or `off`; the first two are enabled compatibility values. |
 
-- `strict` asks Codex for one bounded continuation when the current turn entry is missing.
-- `advisory` reports the missing entry without continuing the turn.
+- `strict` and `advisory` both enable hook-owned writes and never continue a turn to ask the agent to write.
 - `off` disables file and state creation.
 
 The plugin never changes project `.gitignore` files. If worklogs should remain local, add the directory to your existing global Git excludes file. If they should be project history, review and commit them intentionally.
@@ -182,11 +148,12 @@ The plugin never changes project `.gitignore` files. If worklogs should remain l
 
 - All worklog data stays on the local filesystem unless the user or another tool publishes it.
 - The hook performs no network requests and has no telemetry.
-- Raw prompts, transcripts, tool inputs, and tool output are not copied.
-- Agents are instructed to redact secrets and unnecessary personal data.
+- Raw prompts, transcripts, tool inputs, tool output, and complete final responses are not copied.
+- Automatic summaries strip several high-risk structures and common labelled secrets, but users should still review plaintext worklogs before sharing.
+- Normal hooks do not inject history into model context; the read-only skill loads it only for a relevant inspection or recovery request.
+- Absolute local paths and full SHA-256 values are rejected from timeline fields; portable references and linked reports are used instead.
 - Directories and files use `0700` and `0600` modes where POSIX permissions are available.
-- Symbolic links, multi-linked worklog/state files, cross-workspace state, and
-  malformed state are rejected instead of followed or silently replaced.
+- Symbolic links, multi-linked worklog/state files, cross-workspace state, and malformed state are rejected instead of followed or silently replaced.
 - The worklog is not a compliance-grade audit trail: hooks can be disabled, and some hosted tool paths are not observable by local tool hooks.
 
 Read the full [Privacy Policy](PRIVACY.md), [Security Policy](SECURITY.md), and [Threat Model](docs/THREAT_MODEL.md).
@@ -206,11 +173,9 @@ Before contributing, read [CONTRIBUTING.md](CONTRIBUTING.md) and the [Code of Co
 
 - Python must be available to the Codex host.
 - A read-only or restricted `cwd` cannot contain a worklog; the hook reports that condition and does not silently redirect the diary elsewhere.
-- A `cwd` with characters that cannot be represented safely in model context is rejected instead of exposing an altered path.
-- Semantic entries are model-authored and should be reviewed before committing or sharing.
-- Context recovery deliberately reads a small, relevant history rather than loading every prior file.
-- A same-user process can still race model-authored writes after a path was
-  validated; the plugin does not claim protection from a compromised account.
+- A `cwd` with unsafe control, formatting, or Markdown-delimiter characters is rejected instead of being rewritten.
+- Semantic entries are derived from model-authored final responses and should be reviewed before committing or sharing.
+- A same-user process can still race hook-owned writes after a path was validated; the plugin does not claim protection from a compromised account.
 
 ## License
 

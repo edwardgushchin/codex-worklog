@@ -1,7 +1,7 @@
 {
   "name": "codex-worklog",
-  "version": "0.1.0",
-  "description": "Keep an append-only semantic worklog in every Codex workspace and use it to recover context when needed.",
+  "version": "0.1.0+codex.20260901114849",
+  "description": "Automatically append bounded local outcome summaries and recover task history when requested.",
   "author": {
     "name": "Eduard Gushchin",
     "email": "eduardgushchin@yandex.ru",
@@ -21,7 +21,7 @@
   "interface": {
     "displayName": "Codex Worklog",
     "shortDescription": "Local what, when, and why for every task",
-    "longDescription": "Maintains an append-only semantic worklog in the Codex session working directory and teaches the agent to use recent entries for careful context recovery.",
+    "longDescription": "Lifecycle hooks maintain an append-only semantic worklog without active-agent maintenance; a focused skill can inspect that history when context recovery is requested.",
     "developerName": "Eduard Gushchin",
     "category": "Productivity",
     "capabilities": [
@@ -37,7 +37,7 @@
     "logoDark": "./assets/logo-dark.svg",
     "defaultPrompt": [
       "Recover task context from the workspace worklog and verify what is still true.",
-      "Summarize the outcome and rationale; mention changes, checks, or next steps only when useful."
+      "Check whether this plugin's local lifecycle hooks are installed and healthy."
     ]
   }
 }

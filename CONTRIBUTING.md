@@ -1,6 +1,6 @@
 # Contributing to Codex Worklog
 
-Thank you for helping improve Codex Worklog. Contributions are welcome for the hook runtime, lifecycle contract, skill instructions, tests, documentation, accessibility, and marketplace packaging.
+Thank you for helping improve Codex Worklog. Contributions are welcome for the hook runtime, lifecycle contract, history-inspection skill, tests, documentation, accessibility, and marketplace packaging.
 
 ## Before You Start
 
@@ -35,16 +35,18 @@ Changes must preserve these defaults unless a reviewed proposal explicitly repla
 
 - worklogs live under the original session `cwd`;
 - each Codex session has its own append-only Markdown file;
-- material entries use the bundled fixed-schema append helper rather than a
-  general-purpose file edit;
-- acknowledgement-only prompts create no timeline entry, while any additional
-  content remains material;
+- state-change entries are derived and appended by `Stop`, never delegated to the
+  active agent;
+- acknowledgement, inspection, context-recovery, verification-only, and
+  explicit no-change outcomes create no timeline entry unless they establish a
+  cause, decision, transition, or new blocker;
 - prompts, transcripts, tool inputs, and tool output are not copied;
 - `PLUGIN_DATA` contains only minimal session metadata and hashed identifiers;
-- context recovery reads a small relevant history and verifies mutable state;
+- the exported `worklog` skill only inspects history on a relevant request,
+  never maintains it, and lifecycle hooks inject no maintenance context;
 - the plugin does not modify project `.gitignore` files;
 - missing runtime support or unsafe paths are reported instead of silently redirecting data;
-- `Stop` continuation is bounded and cannot loop indefinitely.
+- `Stop` never creates a continuation prompt to request a write.
 
 See [Architecture](docs/ARCHITECTURE.md) and [Threat Model](docs/THREAT_MODEL.md).
 

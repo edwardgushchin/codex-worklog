@@ -6,11 +6,57 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Added optional cause/decision, blocker-link, status-transition, and artifact
+  fields so append-only entries can explicitly retire stale state and point to
+  detailed reports.
+
+### Changed
+
+- Moved routine entry creation entirely into lifecycle hooks. `SessionStart`
+  and `UserPromptSubmit` no longer inject paths, schemas, markers, or file-work
+  instructions into model context; `Stop` appends directly from a bounded
+  normalized subset of `last_assistant_message`.
+- Limited the exported `worklog` skill to requested history inspection and
+  context recovery; routine logging remains entirely hook-owned and supplies
+  no maintenance instructions to the active agent.
+- Added the full date and UTC offset to every entry heading and switched diary
+  labels to the detected system language.
+- Replaced the visible absolute workspace path with portable project name and,
+  when available, sanitized repository, branch, and abbreviated `HEAD`
+  metadata.
+- Reduced verification text to the checked item and result; detailed logs,
+  complete test inventories, and full digests now belong in linked reports.
+
 ### Fixed
 
 - Replaced generic project-scope wording with a concrete description of
   automatic semantic worklogging and made the README logo switch to its
   high-contrast variant in dark mode.
+- Made `Stop` reconstruct missing session state when earlier lifecycle hooks
+  were skipped, and replaced missing-marker continuation prompts with a direct
+  idempotent hook-owned append.
+- Prevented read-only inspection, context recovery, verification, and explicit
+  no-change outcomes from creating misleading timeline entries. Causes,
+  decisions, transitions, and newly discovered blockers remain recordable.
+- Extract optional cause/decision, blocker link, status transition, concise
+  verification, artifact, and next-step fields in the normal lifecycle path.
+- Fall back from a non-linguistic hook-process locale to the host locale
+  configuration, with a validated explicit language override when needed.
+- Confined requested worklog recovery to the current task `cwd` and prohibited
+  the bundled skill from initiating global-memory or conversation-history
+  searches; context recovery itself never re-appends historical fields.
+
+### Security
+
+- Reject absolute local paths and full SHA-256 values from entry fields, strip
+  credentials from repository metadata, and validate project-relative artifact
+  links before appending them.
+- Strip fenced code, hook metadata, link targets, local paths, full SHA-256
+  values, and common labelled secrets from automatic summaries; generic token
+  and private-key assignments plus unquoted local paths containing spaces are
+  covered explicitly. Never store the complete final response in plugin state.
 
 ## [0.1.0] - 2026-08-30
 

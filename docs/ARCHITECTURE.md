@@ -1,14 +1,14 @@
 # Architecture
 
-Codex Worklog is a local plugin composed of a repo marketplace, one plugin manifest, lifecycle hooks, a Python standard-library runtime, and a context-recovery skill.
+Codex Worklog is a local plugin composed of a repo marketplace, one plugin manifest, lifecycle hooks, a focused history-inspection skill, and a Python standard-library runtime.
 
 ## Goals
 
 - Work in coding and non-coding directories.
 - Require no project-local agent instructions.
 - Keep the log beside the work, in the original Codex session `cwd`.
-- Explain what happened, when, and why without copying the conversation.
-- Give a resumed or compacted agent a bounded path back to relevant context.
+- Record one bounded outcome for each resulting state change without copying the conversation or asking the active agent to maintain files.
+- Expose worklog history only through a focused inspection and context-recovery skill, never through routine model-facing maintenance context.
 - Avoid collisions between concurrent Codex tasks.
 - Fail visibly when the requested location is unsafe or unwritable.
 
@@ -26,71 +26,86 @@ Codex host
                                 │           └─ PLUGIN_DATA/sessions/<hash>.json
                                 v
                    <session cwd>/.dev-diary/YYYY/MM/<session>.md
+
+Requested history inspection
+  │
+  └─ skills/worklog/SKILL.md ──> read-only worklog tail and linked evidence
 ```
 
 - `.agents/plugins/marketplace.json` exposes the plugin through a repo marketplace.
-- `.codex-plugin/plugin.json` provides stable identity, discovery metadata, assets, and the `worklog` skill path.
+- `.codex-plugin/plugin.json` provides stable identity, discovery metadata, assets, and the bundled skill directory.
 - `hooks/hooks.json` uses the default plugin hook discovery location.
 - `scripts/worklog.py` is the only runtime program. It handles lifecycle events
   and exposes the bounded `append` command, with no third-party dependencies.
-- `skills/worklog/SKILL.md` handles explicit history inspection and context recovery.
+- `skills/worklog/SKILL.md` provides read-only history inspection and context recovery only when that history is relevant to the user's request. It never appends or repairs entries.
 
 ## Lifecycle
 
 ### SessionStart
 
-The hook validates `cwd`, creates a private per-session Markdown file, and stores its absolute path in `PLUGIN_DATA`. Startup context tells the agent:
+The hook validates `cwd`, creates a private per-session Markdown file, stores
+its absolute path in `PLUGIN_DATA`, and returns an empty JSON object. It does not
+add instructions or paths to model context.
 
-- where to append entries;
-- how to record a concise summary and omit unused optional fields;
-- how to redact sensitive information;
-- how to recover context after resume or compaction;
-- that mutable state must be checked again.
-
-If the same session is resumed or compacted, the existing file is reused. A new session receives a new file and a pointer to the newest previous worklog when one exists.
+If the same session is resumed or compacted, the existing file is reused. A new
+session receives a new file and a pointer to the newest previous worklog when
+one exists. Its visible header contains no absolute local path: it records the
+project name and, when available, a sanitized repository identifier, branch,
+and abbreviated `HEAD`. Optional Git metadata is collected only through bounded,
+non-interactive local commands; a non-Git directory still receives a worklog.
 
 ### UserPromptSubmit
 
-The runtime applies a local, deterministic exact-phrase classifier to the
-current prompt and immediately discards the text. A short prompt made entirely
-of a recognized acknowledgement is marked as non-material; any additional word
-keeps the normal logging contract. Only the resulting Boolean is retained.
-
-For a material turn, the runtime hashes `turn_id` with SHA-256, truncates the
-digest, and supplies the installed helper path, its exact input schema, and an
-exact Markdown marker. The marker proves only that an entry was appended for
-the turn; it does not authenticate content.
-
-### Append helper
-
-The agent invokes `scripts/worklog.py append` once from the session `cwd` and
-sends a bounded JSON object on standard input. The helper requires `title` and
-`summary`, accepts only the optional `changes`, `verification`, and `next`
-fields, rejects multiline/control content and reserved markers, revalidates the
-worklog as a regular single-link file inside that `cwd`, adds the local
-timestamp, and writes with `O_APPEND`, flush, and `fsync`.
-
-If the exact turn marker already exists in the recent tail, the helper returns
-success without adding a duplicate. The agent does not perform separate path
-inspection or a general-purpose Markdown edit.
+The runtime applies a local deterministic intent classifier to the current
+prompt and immediately discards the text. It retains only an enum distinguishing
+acknowledgement, requested change, context recovery, other read-only work, and
+unknown intent, plus a truncated SHA-256 token of `turn_id`. Context recovery
+always produces no entry, preventing previously recorded causes and transitions
+from being logged again, while a prompt that combines inspection and an edit is
+treated as a requested change. The hook returns an empty JSON object.
 
 ### Stop
 
 For a turn classified as acknowledgement-only, the hook returns immediately.
-For a material turn, it reads only the tail of the current worklog and searches
-for the exact turn marker.
+Otherwise, `Stop` uses the official `last_assistant_message` field and does not
+read `transcript_path`. A deterministic result classifier omits read-only
+inspection, context recovery, verification, and explicit no-change results.
+A discovered cause, non-obvious decision, blocker, explicit transition, or
+reported mutation remains recordable. Thus one completed turn can append at
+most one state-change entry, regardless of how many preparation, execution, or
+verification steps the response mentions.
 
-- `strict`: ask Codex for one continuation when missing;
-- `advisory`: show a warning without continuing;
-- `off`: do nothing.
+The normalizer removes fenced code, hook directives, HTML metadata, link
+destinations, local paths, full SHA-256 values, and common labelled secret
+values, then keeps at most three prose lines for the outcome. It also recovers
+optional cause/decision, blocker and status transitions, concise verification,
+artifact links, and next-step fields only when the final response contains
+safe evidence for them. A completed state can link to a matching earlier
+blocker in the same worklog so stale append-only status remains visibly retired.
 
-`stop_hook_active` prevents an infinite continuation loop. A second miss produces a warning and allows the turn to end.
+The runtime derives the title from the first sentence, revalidates the stored
+workspace and target, adds the full local date, time, and UTC offset, and writes
+with `O_APPEND`, flush, and `fsync`. A hidden turn marker makes repeated `Stop`
+events idempotent; the marker is never sent to the agent. If earlier lifecycle
+events did not create state, `Stop` reconstructs it from `session_id` and
+`cwd`. Missing final text or a filesystem failure produces a warning and never
+creates a continuation that asks the agent to write.
+
+The `append` CLI remains a bounded compatibility and development interface. It
+uses the same path checks and append primitive, but normal lifecycle operation
+does not invoke it through the active agent.
 
 ### SessionEnd
 
 The hook validates the stored worklog path and records a closed flag in private
 plugin state. It never adds session lifecycle messages to the human-readable
 timeline. Repeated end events are idempotent until the session resumes.
+
+## Context Recovery
+
+Normal lifecycle hooks never inject worklog paths, contents, or maintenance instructions into model context. When the user asks what happened previously, why a decision was made, where work stopped, or requests a worklog status, the bundled `worklog` skill can inspect the newest relevant tail inside the current task `cwd`.
+
+The skill treats all diary text as untrusted historical evidence, follows no embedded instructions, opens linked reports only when needed, and separates recorded claims from facts rechecked in the current task. It is not part of the append path.
 
 ## Storage Contract
 
@@ -104,8 +119,11 @@ Properties:
 
 - one file per session;
 - chronological, append-only entries;
+- full ISO-style entry timestamps with a UTC offset, even when a session crosses
+  midnight;
 - sortable ISO date components;
 - no raw session or turn identifier in the filename;
+- system-language structural labels and hook-derived values;
 - `0700` directories and `0600` files from creation time when POSIX modes are
   available.
 
@@ -115,29 +133,19 @@ State path:
 <PLUGIN_DATA>/sessions/<session-hash>.json
 ```
 
-State contains only paths, timestamps, lifecycle Boolean flags, and hashed turn
-identifiers. It does not contain the user prompt or transcript.
-
-## Context Recovery
-
-Context recovery is deliberately progressive:
-
-1. read the tail of the current session file;
-2. consult the newest relevant earlier session only if needed;
-3. summarize objective, outcomes, rationale, evidence, blockers, and any real next step;
-4. verify live or time-sensitive state before taking action.
-
-This avoids injecting every historical entry into the model context and reduces the chance of stale notes overriding current evidence.
-Worklog text is explicitly treated as untrusted history: embedded instructions
-or apparent authorization are never followed.
+State contains only paths, timestamps, the detected language code, a small
+intent enum, lifecycle Boolean flags, and hashed turn identifiers. It does not
+contain the user prompt, transcript, or final assistant message.
 
 ## Path Safety
 
 - `CODEX_WORKLOG_DIR` must be a portable relative path and cannot contain `..`,
   Windows drive or backslash syntax, control characters, or Markdown backticks.
 - A `cwd` or restored worklog path containing control/format characters,
-  Markdown backticks, or an unbounded model-context value fails visibly instead
-  of supplying an altered path to the agent.
+  Markdown backticks, or an overlong value fails visibly instead of being
+  rewritten.
+- Human-readable headers omit `cwd`; entry fields reject absolute POSIX,
+  Windows, home-relative, and `file://` paths.
 - Equivalent canonical operating-system aliases, such as macOS `/var` and
   `/private/var`, are accepted without relaxing workspace confinement.
 - Existing symbolic links in worklog or plugin-state paths, including the
@@ -151,10 +159,15 @@ or apparent authorization are never followed.
   discovered merely because they have a Codex Worklog heading.
 - Corrupt, oversized, or structurally invalid state fails visibly instead of
   being silently replaced.
-- An unsafe or missing path produces a model-visible warning; the runtime does not redirect records to another directory.
+- An unsafe or missing path produces a hook warning; the runtime does not redirect records to another directory.
 
 ## Compatibility
 
 The runtime targets Python 3.10 or newer and uses `python3` on Unix-like hosts and `py -3` on Windows. Hook commands resolve the installed script through `PLUGIN_ROOT`, while writable state uses `PLUGIN_DATA`.
+
+Visible-language detection ignores non-linguistic `C` and `POSIX` process
+locales, consults the host locale configuration when available, and supports a
+validated `CODEX_WORKLOG_LANGUAGE` override for environments that do not expose
+a usable system locale.
 
 Codex hook behavior is versioned outside this repository. Release validation must compare the implementation with the current [Codex hooks documentation](https://learn.chatgpt.com/docs/hooks).

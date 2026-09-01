@@ -3,7 +3,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
-import re
 import stat
 import subprocess
 import sys
@@ -32,7 +31,11 @@ class WorklogHookTests(unittest.TestCase):
         self.workspace = self.root / "workspace"
         self.plugin_data = self.root / "plugin-data"
         self.workspace.mkdir()
-        self.environment = {"PLUGIN_DATA": str(self.plugin_data)}
+        self.environment = {
+            "PLUGIN_DATA": str(self.plugin_data),
+            "LANG": "en_US.UTF-8",
+            "LC_ALL": "C.UTF-8",
+        }
         self.now = datetime(
             2026, 8, 30, 11, 15, 30, tzinfo=timezone(timedelta(hours=3))
         )
@@ -100,8 +103,10 @@ class WorklogHookTests(unittest.TestCase):
             "worklog_path": str(diary),
             "marker": marker,
             "title": "Completed requested work",
-            "summary": "Completed the material task with one concise rationale.",
-            "changes": "Recorded the verified outcome.",
+            "summary": "The requested state is complete.",
+            "reason": "Selected the narrowest reversible implementation.",
+            "unblocks": "10:45 — awaiting the requested state",
+            "supersedes_status": "in-progress → complete",
             "verification": "The exact turn marker is present.",
             "next": "Continue only if another task is requested.",
         }
@@ -112,10 +117,12 @@ class WorklogHookTests(unittest.TestCase):
         self,
         diary: Path,
         marker: str,
+        environment: dict[str, str] | None = None,
         **overrides: str,
     ) -> subprocess.CompletedProcess[str]:
         return self.run_cli(
             json.dumps(self.append_payload(diary, marker, **overrides)),
+            environment=environment,
             arguments=("append",),
         )
 
@@ -127,11 +134,217 @@ class WorklogHookTests(unittest.TestCase):
         self.assertEqual(len(sanitized), worklog.MAX_INLINE_CHARS)
         self.assertTrue(sanitized.endswith("…"))
 
+    def test_automatic_summary_redacts_generic_secrets_and_spaced_paths(self) -> None:
+        title, summary = worklog._automatic_entry_text(
+            (
+                "Completed the requested check.\n\n"
+                "- Token=token-canary-value and private_key='private-canary-value'.\n"  # pragma: allowlist secret
+                "- Saved /home/example/Private Reports/result.txt after verification.\n"
+            ),
+            "en",
+        )
+
+        self.assertEqual(title, "Completed the requested check")
+        self.assertIn("Token=[redacted]", summary)
+        self.assertIn("private_key=[redacted]", summary)
+        self.assertIn("[local path]", summary)
+        self.assertNotIn("token-canary-value", summary)
+        self.assertNotIn("private-canary-value", summary)
+        self.assertNotIn("Private Reports/result.txt", summary)
+
+    def test_system_language_ignores_nonlinguistic_c_locale(self) -> None:
+        self.assertEqual(
+            worklog._system_language({"LC_ALL": "C.UTF-8", "LANG": "ru_RU.UTF-8"}),
+            "ru",
+        )
+        self.assertEqual(
+            worklog._system_language({"LC_ALL": "de_DE.UTF-8", "LANG": "ru_RU.UTF-8"}),
+            "de",
+        )
+
+    def test_system_language_falls_back_to_the_host_locale_file(self) -> None:
+        locale_file = self.root / "locale.conf"
+        locale_file.write_text('LANG="ru_RU.UTF-8"\n', encoding="utf-8")
+
+        self.assertEqual(
+            worklog._system_language(
+                {"LC_ALL": "C.UTF-8", "LANG": "C.UTF-8"},
+                system_locale_paths=(locale_file,),
+            ),
+            "ru",
+        )
+        self.assertEqual(
+            worklog._system_language(
+                {
+                    "CODEX_WORKLOG_LANGUAGE": "de-DE",
+                    "LC_ALL": "C.UTF-8",
+                    "LANG": "C.UTF-8",
+                },
+                system_locale_paths=(locale_file,),
+            ),
+            "de",
+        )
+
+    def test_repository_metadata_is_portable_and_redacts_remote_credentials(
+        self,
+    ) -> None:
+        responses = {
+            ("rev-parse", "--show-toplevel"): str(self.workspace),
+            ("config", "--get", "remote.origin.url"): (
+                "https://account:credential@example.test/team/project.git"  # pragma: allowlist secret
+            ),
+            ("symbolic-ref", "--quiet", "--short", "HEAD"): "main",
+            ("rev-parse", "HEAD"): "a" * 40,
+        }
+
+        def git_output(_workspace: Path, *arguments: str) -> str | None:
+            return responses.get(arguments)
+
+        with mock.patch.object(worklog, "_git_output", side_effect=git_output):
+            metadata = worklog._project_metadata(self.workspace)
+
+        self.assertEqual(
+            metadata,
+            {
+                "project": "workspace",
+                "repository": "team/project",
+                "branch": "main",
+                "head": "a" * 12,
+            },
+        )
+        self.assertNotIn("credential", json.dumps(metadata))
+        self.assertEqual(
+            worklog._repository_identifier("/private/local/repository", "fallback"),
+            "fallback",
+        )
+
+    def test_russian_system_language_localizes_header_and_entry(self) -> None:
+        environment = {
+            **self.environment,
+            "LANG": "ru_RU.UTF-8",
+            "LC_ALL": "C.UTF-8",
+        }
+        metadata = {
+            "project": "codex-worklog",
+            "repository": "team/codex-worklog",
+            "branch": "main",
+            "head": "0123456789ab",
+        }
+        with mock.patch.object(worklog, "_project_metadata", return_value=metadata):
+            response = worklog.handle_event(
+                self.event("SessionStart", source="startup"), environment, self.now
+            )
+
+        diary = self.worklog_files()[0]
+        contents = diary.read_text(encoding="utf-8")
+        self.assertIn("- Начат: 2026-08-30T11:15:30+03:00", contents)
+        self.assertIn("- Проект: `codex-worklog`", contents)
+        self.assertIn("- Репозиторий: `team/codex-worklog`", contents)
+        self.assertIn("- Ветка: `main`", contents)
+        self.assertIn("- HEAD: `0123456789ab`", contents)
+        self.assertIn("## Хронология", contents)
+        self.assertNotIn(str(self.workspace), contents)
+        self.assertEqual(response, {})
+
+        self.assertEqual(
+            worklog.handle_event(
+                self.event(
+                    "UserPromptSubmit",
+                    turn_id="russian-automatic-entry",
+                    prompt="Установи пакет",
+                ),
+                environment,
+                self.now,
+            ),
+            {},
+        )
+        self.assertEqual(
+            worklog.handle_event(
+                self.event(
+                    "Stop",
+                    turn_id="russian-automatic-entry",
+                    last_assistant_message="Пакет установлен. Версия подтверждена.",
+                ),
+                environment,
+                self.now,
+            ),
+            {},
+        )
+        contents = diary.read_text(encoding="utf-8")
+        self.assertIn("- Результат: Пакет установлен. Версия подтверждена.", contents)
+
+        marker = worklog._marker(worklog._token("russian-helper-entry"))
+        completed = self.append_with_helper(
+            diary,
+            marker,
+            environment=environment,
+            title="Статус обновлён",
+            summary="Пакет установлен.",
+            reason="Повторный запрос авторизации был подтверждён пользователем.",
+            unblocks="01:29 — ожидание PolicyKit",
+            supersedes_status="package-ready → installed",
+            verification="Установленная версия подтверждена.",
+            next="Проверить новую сессию после входа.",
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        contents = diary.read_text(encoding="utf-8")
+        self.assertIn("- Результат: Пакет установлен.", contents)
+        self.assertIn("- Причина/решение:", contents)
+        self.assertIn("- Разблокирует: 01:29 — ожидание PolicyKit", contents)
+        self.assertIn("- Заменяет статус: package-ready → installed", contents)
+        self.assertIn("- Проверено: Установленная версия подтверждена.", contents)
+        self.assertIn("- Далее: Проверить новую сессию после входа.", contents)
+
+    def test_entry_header_uses_full_date_and_timezone_after_midnight(self) -> None:
+        self.start()
+        diary = self.worklog_files()[0]
+        marker = worklog._marker(worklog._token("after-midnight"))
+        payload = {
+            "worklog_path": str(diary),
+            "marker": marker,
+            "title": "Accepted the final state",
+            "summary": "The new state is accepted.",
+        }
+        after_midnight = self.now + timedelta(hours=13)
+
+        with mock.patch.object(worklog.Path, "cwd", return_value=self.workspace):
+            appended = worklog._append_entry(
+                payload, now=after_midnight, environment=self.environment
+            )
+
+        self.assertTrue(appended)
+        contents = diary.read_text(encoding="utf-8")
+        self.assertIn("### 2026-08-31T00:15+03:00 — Accepted the final state", contents)
+
+    def test_artifacts_are_linked_from_project_relative_reports(self) -> None:
+        self.start()
+        reports = self.workspace / "reports"
+        reports.mkdir()
+        report = reports / "verification report.md"
+        report.write_text("# Verification\n", encoding="utf-8")
+        diary = self.worklog_files()[0]
+        marker = worklog._marker(worklog._token("artifact-entry"))
+
+        completed = self.append_with_helper(
+            diary,
+            marker,
+            artifacts=("[verification report](<reports/verification report.md>)"),
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        contents = diary.read_text(encoding="utf-8")
+        self.assertIn(
+            "- Artifacts: [verification report](<../../../reports/verification "
+            "report.md>)",
+            contents,
+        )
+
     def test_private_mode_failure_is_nonfatal(self) -> None:
         with mock.patch.object(Path, "chmod", side_effect=OSError("unsupported")):
             worklog._private_mode(self.workspace, 0o700)
 
-    def test_session_start_creates_private_log_and_recovery_context(self) -> None:
+    def test_session_start_creates_private_log_without_model_context(self) -> None:
         response = self.start(source="startup")
 
         files = self.worklog_files()
@@ -143,14 +356,15 @@ class WorklogHookTests(unittest.TestCase):
         contents = path.read_text(encoding="utf-8")
         self.assertIn("# Codex Worklog", contents)
         self.assertIn("## Timeline", contents)
+        self.assertIn("- Project: `workspace`", contents)
+        self.assertIn("- Started: 2026-08-30T11:15:30+03:00", contents)
+        self.assertNotIn(str(self.workspace), contents)
+        self.assertNotIn("- Workspace:", contents)
         self.assertNotIn("session-one", contents)
         self.assertNotIn("- Session:", contents)
         self.assertNotIn("- Model:", contents)
 
-        context = response["hookSpecificOutput"]["additionalContext"]
-        self.assertIn(str(path), context)
-        self.assertIn("read the tail of the current worklog first", context)
-        self.assertIn("verify mutable", context)
+        self.assertEqual(response, {})
 
         self.assertEqual(len(self.state_files()), 1)
         if os.name != "nt":
@@ -173,10 +387,11 @@ class WorklogHookTests(unittest.TestCase):
         )
 
         self.assertEqual(len(self.worklog_files()), 2)
-        context = response["hookSpecificOutput"]["additionalContext"]
-        self.assertIn(str(first_path), context)
-        self.assertIn("older context", context)
-        self.assertIn("untrusted historical notes", context)
+        self.assertEqual(response, {})
+        state = json.loads(
+            worklog._state_path(self.plugin_data, "second").read_text(encoding="utf-8")
+        )
+        self.assertEqual(state["previous_worklog_path"], str(first_path))
 
     def test_custom_nested_worklog_directory(self) -> None:
         environment = {**self.environment, "CODEX_WORKLOG_DIR": "notes/private-log"}
@@ -223,10 +438,9 @@ class WorklogHookTests(unittest.TestCase):
             self.now,
         )
 
-        context = response["hookSpecificOutput"]["additionalContext"]
+        self.assertEqual(response, {})
         diary = self.worklog_files()[0].read_text(encoding="utf-8")
         for forbidden in ("\x1b", "\t", "\u2028", "\u202e", "\u2066"):
-            self.assertNotIn(forbidden, context)
             self.assertNotIn(forbidden, diary)
         self.assertNotIn("gpt-test", diary)
 
@@ -254,11 +468,14 @@ class WorklogHookTests(unittest.TestCase):
             self.now + timedelta(hours=1),
         )
 
-        context = response["hookSpecificOutput"]["additionalContext"]
-        self.assertIn(str(first_path), context)
-        self.assertNotIn(str(unrelated), context)
-        self.assertNotIn(str(outside), context)
-        self.assertNotIn(str(symlink), context)
+        self.assertEqual(response, {})
+        state = json.loads(
+            worklog._state_path(self.plugin_data, "second").read_text(encoding="utf-8")
+        )
+        self.assertEqual(state["previous_worklog_path"], str(first_path))
+        self.assertNotIn(str(unrelated), json.dumps(state))
+        self.assertNotIn(str(outside), json.dumps(state))
+        self.assertNotIn(str(symlink), json.dumps(state))
 
     def test_tampered_previous_worklog_pointer_is_not_advertised(self) -> None:
         self.start(session="first")
@@ -276,11 +493,37 @@ class WorklogHookTests(unittest.TestCase):
             self.now + timedelta(hours=1),
         )
 
-        context = response["hookSpecificOutput"]["additionalContext"]
-        self.assertNotIn(str(outside), context)
-        self.assertNotIn("older context", context)
+        self.assertEqual(response, {})
+        self.assertEqual(
+            worklog.handle_event(
+                self.event(
+                    "UserPromptSubmit",
+                    "second",
+                    turn_id="safe-turn",
+                    prompt="status",
+                ),
+                self.environment,
+                self.now + timedelta(hours=1),
+            ),
+            {},
+        )
+        self.assertEqual(
+            worklog.handle_event(
+                self.event(
+                    "Stop",
+                    "second",
+                    turn_id="safe-turn",
+                    last_assistant_message="Verified the current state.",
+                ),
+                self.environment,
+                self.now + timedelta(hours=1),
+            ),
+            {},
+        )
+        rendered = self.worklog_files()[1].read_text(encoding="utf-8")
+        self.assertNotIn(str(outside), rendered)
 
-    def test_prompt_is_not_persisted_and_stop_requires_exact_marker(self) -> None:
+    def test_hooks_own_append_without_model_context_or_transcript(self) -> None:
         self.start()
         secret_prompt = (
             "deploy with token super-secret-value"  # pragma: allowlist secret
@@ -295,15 +538,8 @@ class WorklogHookTests(unittest.TestCase):
             self.environment,
             self.now,
         )
-        context = prompt_response["hookSpecificOutput"]["additionalContext"]
-        marker_match = re.search(r"<!-- codex-worklog-turn:[0-9a-f]{16} -->", context)
-        self.assertIsNotNone(marker_match)
-        if marker_match is None:
-            self.fail("turn marker is missing")
-        marker = marker_match.group(0)
-        self.assertIn(str(WORKLOG_SCRIPT), context)
-        self.assertIn("`append` argument", context)
-        self.assertIn("Do not preflight, inspect, or edit", context)
+        self.assertEqual(prompt_response, {})
+        marker = worklog._marker(worklog._token("turn-one"))
 
         stored_text = "\n".join(
             path.read_text(encoding="utf-8")
@@ -312,50 +548,66 @@ class WorklogHookTests(unittest.TestCase):
         self.assertNotIn(secret_prompt, stored_text)
         self.assertNotIn("super-secret-value", stored_text)
 
+        assistant_message = """Completed requested work. The verified state is ready.
+
+- Updated [the runtime](/private/output.md).
+- API key=assistant-secret-value
+
+```text
+raw tool output must not be retained
+```
+
+Fourth prose paragraph must not be retained.
+
+<oai-mem-citation>
+private memory details
+</oai-mem-citation>
+"""  # pragma: allowlist secret
         stop_response = worklog.handle_event(
             self.event(
                 "Stop",
                 turn_id="turn-one",
                 stop_hook_active=False,
-                last_assistant_message="secret assistant output",
+                last_assistant_message=assistant_message,
             ),
             self.environment,
             self.now,
         )
-        self.assertEqual(stop_response["decision"], "block")
-        self.assertIn(marker, stop_response["reason"])
+        self.assertEqual(stop_response, {})
         stored_text = "\n".join(
             path.read_text(encoding="utf-8")
             for path in self.worklog_files() + self.state_files()
         )
         self.assertNotIn("private/transcript", stored_text)
-        self.assertNotIn("secret assistant output", stored_text)
+        self.assertNotIn("/private/output.md", stored_text)
+        self.assertNotIn("assistant-secret-value", stored_text)
+        self.assertNotIn("raw tool output", stored_text)
+        self.assertNotIn("Fourth prose paragraph", stored_text)
+        self.assertNotIn("private memory details", stored_text)
 
         diary = self.worklog_files()[0]
-        appended = self.append_with_helper(diary, marker)
-        self.assertEqual(appended.returncode, 0)
-        self.assertEqual(json.loads(appended.stdout), {"appended": True})
-        self.assertEqual(appended.stderr, "")
         rendered = diary.read_text(encoding="utf-8")
-        self.assertIn("- Summary: Completed the material task", rendered)
-        self.assertIn("- Changes: Recorded the verified outcome.", rendered)
-        self.assertIn("- Verification: The exact turn marker is present.", rendered)
-        self.assertIn("- Next: Continue only if another task is requested.", rendered)
-        self.assertNotIn("- Context:", rendered)
-        self.assertNotIn("- Actions:", rendered)
-        self.assertNotIn("- Decisions:", rendered)
+        self.assertRegex(
+            rendered,
+            r"### \d{4}-\d{2}-\d{2}T\d{2}:\d{2}[+-]\d{2}:\d{2} — Completed requested work",
+        )
+        self.assertIn("- Outcome: Completed requested work.", rendered)
+        self.assertIn("Updated the runtime.", rendered)
+        self.assertIn("API key=[redacted]", rendered)
+        self.assertEqual(rendered.count(marker), 1)
 
-        duplicate = self.append_with_helper(diary, marker)
-        self.assertEqual(duplicate.returncode, 0)
-        self.assertEqual(json.loads(duplicate.stdout), {"appended": False})
-        self.assertEqual(diary.read_text(encoding="utf-8").count(marker), 1)
-
-        verified = worklog.handle_event(
-            self.event("Stop", turn_id="turn-one", stop_hook_active=True),
+        repeated = worklog.handle_event(
+            self.event(
+                "Stop",
+                turn_id="turn-one",
+                stop_hook_active=True,
+                last_assistant_message=assistant_message,
+            ),
             self.environment,
             self.now,
         )
-        self.assertEqual(verified, {})
+        self.assertEqual(repeated, {})
+        self.assertEqual(diary.read_text(encoding="utf-8").count(marker), 1)
 
     def test_minimal_entry_omits_optional_fields_without_placeholders(self) -> None:
         self.start()
@@ -372,9 +624,12 @@ class WorklogHookTests(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 0)
         contents = diary.read_text(encoding="utf-8")
-        self.assertIn("- Summary: Answered the question", contents)
-        self.assertNotIn("- Changes:", contents)
-        self.assertNotIn("- Verification:", contents)
+        self.assertIn("- Outcome: Answered the question", contents)
+        self.assertNotIn("- Reason/decision:", contents)
+        self.assertNotIn("- Verified:", contents)
+        self.assertNotIn("- Artifacts:", contents)
+        self.assertNotIn("- Unblocks:", contents)
+        self.assertNotIn("- Supersedes status:", contents)
         self.assertNotIn("- Next:", contents)
         self.assertNotIn("none", contents.casefold())
 
@@ -402,6 +657,261 @@ class WorklogHookTests(unittest.TestCase):
             with self.subTest(material=prompt):
                 self.assertFalse(worklog._is_acknowledgement_prompt(prompt))
 
+    def test_prompt_intent_keeps_context_recovery_read_only(self) -> None:
+        self.assertEqual(
+            worklog._prompt_intent("$worklog восстанови контекст"),
+            "context_recovery",
+        )
+        self.assertEqual(worklog._prompt_intent("Проверь статус"), "read_only")
+        self.assertEqual(worklog._prompt_intent("Проверь и исправь runtime"), "change")
+
+    def test_read_only_no_change_turn_preserves_the_worklog_byte_for_byte(
+        self,
+    ) -> None:
+        self.start()
+        diary = self.worklog_files()[0]
+        original = diary.read_bytes()
+
+        self.assertEqual(
+            worklog.handle_event(
+                self.event(
+                    "UserPromptSubmit",
+                    turn_id="read-only-recovery",
+                    prompt="$worklog восстанови контекст и проверь текущий файл",
+                ),
+                self.environment,
+                self.now,
+            ),
+            {},
+        )
+        self.assertEqual(
+            worklog.handle_event(
+                self.event(
+                    "Stop",
+                    turn_id="read-only-recovery",
+                    last_assistant_message=(
+                        "История восстановлена. Ничего не изменял."
+                    ),
+                ),
+                self.environment,
+                self.now,
+            ),
+            {},
+        )
+
+        self.assertEqual(diary.read_bytes(), original)
+        state_text = self.state_files()[0].read_text(encoding="utf-8")
+        self.assertNotIn("восстанови контекст", state_text)
+        self.assertNotIn("История восстановлена", state_text)
+
+    def test_context_recovery_never_relogs_historical_fields(self) -> None:
+        self.start()
+        diary = self.worklog_files()[0]
+        original = diary.read_bytes()
+        worklog.handle_event(
+            self.event(
+                "UserPromptSubmit",
+                turn_id="historical-fields",
+                prompt="$worklog восстанови контекст",
+            ),
+            self.environment,
+            self.now,
+        )
+
+        response = worklog.handle_event(
+            self.event(
+                "Stop",
+                turn_id="historical-fields",
+                last_assistant_message=(
+                    "История восстановлена.\n"
+                    "Причина/решение: Ранее был найден дефект.\n"
+                    "Заменяет статус: package-ready → installed\n"
+                    "Ничего не изменял."
+                ),
+            ),
+            self.environment,
+            self.now,
+        )
+
+        self.assertEqual(response, {})
+        self.assertEqual(diary.read_bytes(), original)
+
+    def test_read_only_verification_does_not_create_a_state_change(self) -> None:
+        self.start()
+        diary = self.worklog_files()[0]
+        original = diary.read_bytes()
+        worklog.handle_event(
+            self.event(
+                "UserPromptSubmit",
+                turn_id="verified-status",
+                prompt="Check the current status",
+            ),
+            self.environment,
+            self.now,
+        )
+
+        response = worklog.handle_event(
+            self.event(
+                "Stop",
+                turn_id="verified-status",
+                last_assistant_message="The current status was verified.",
+            ),
+            self.environment,
+            self.now,
+        )
+
+        self.assertEqual(response, {})
+        self.assertEqual(diary.read_bytes(), original)
+
+    def test_explicit_nothing_changed_overrides_completion_wording(self) -> None:
+        self.start()
+        diary = self.worklog_files()[0]
+        original = diary.read_bytes()
+        worklog.handle_event(
+            self.event(
+                "UserPromptSubmit",
+                turn_id="explicit-no-change",
+                prompt=(
+                    "Не читай файлы проекта и ничего не меняй. "
+                    "Ответь только результатом."
+                ),
+            ),
+            self.environment,
+            self.now,
+        )
+
+        response = worklog.handle_event(
+            self.event(
+                "Stop",
+                turn_id="explicit-no-change",
+                last_assistant_message=(
+                    "Полевой no-change сеанс завершён. Ничего не изменял."
+                ),
+            ),
+            self.environment,
+            self.now,
+        )
+
+        self.assertEqual(response, {})
+        self.assertEqual(diary.read_bytes(), original)
+
+    def test_read_only_root_cause_is_a_recordable_knowledge_change(self) -> None:
+        environment = {**self.environment, "CODEX_WORKLOG_LANGUAGE": "ru"}
+        worklog.handle_event(
+            self.event("SessionStart", source="startup"), environment, self.now
+        )
+        worklog.handle_event(
+            self.event(
+                "UserPromptSubmit",
+                turn_id="root-cause",
+                prompt="Проверь, почему установка не работает",
+            ),
+            environment,
+            self.now,
+        )
+
+        response = worklog.handle_event(
+            self.event(
+                "Stop",
+                turn_id="root-cause",
+                last_assistant_message=(
+                    "Причина дефекта — неверный ключ конфигурации. Ничего не изменял."
+                ),
+            ),
+            environment,
+            self.now,
+        )
+
+        self.assertEqual(response, {})
+        rendered = self.worklog_files()[0].read_text(encoding="utf-8")
+        self.assertEqual(rendered.count("codex-worklog-turn:"), 1)
+        self.assertIn("- Причина/решение: Причина дефекта", rendered)
+
+    def test_lifecycle_extracts_transition_fields_and_report_link(self) -> None:
+        environment = {
+            **self.environment,
+            "CODEX_WORKLOG_LANGUAGE": "ru",
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+        }
+        reports = self.workspace / "reports"
+        reports.mkdir()
+        (reports / "install.md").write_text("# Проверка\n", encoding="utf-8")
+        worklog.handle_event(
+            self.event("SessionStart", source="startup"), environment, self.now
+        )
+
+        worklog.handle_event(
+            self.event(
+                "UserPromptSubmit",
+                turn_id="blocked-install",
+                prompt="Установи пакет",
+            ),
+            environment,
+            self.now,
+        )
+        worklog.handle_event(
+            self.event(
+                "Stop",
+                turn_id="blocked-install",
+                last_assistant_message=(
+                    "Установка заблокирована ожиданием PolicyKit.\n\n"
+                    "Причина/решение: Требуется подтверждение пользователя.\n"
+                    "Заменяет статус: package-ready → blocked\n"
+                    "Далее: Подтвердить PolicyKit."
+                ),
+            ),
+            environment,
+            self.now,
+        )
+        blocked_rendered = self.worklog_files()[0].read_text(encoding="utf-8")
+        self.assertIn(
+            "- Причина/решение: Требуется подтверждение пользователя.",
+            blocked_rendered,
+        )
+        self.assertNotIn("- Проверено:", blocked_rendered)
+
+        later = self.now + timedelta(minutes=14)
+        worklog.handle_event(
+            self.event(
+                "UserPromptSubmit",
+                turn_id="installed-package",
+                prompt="Повтори установку пакета",
+            ),
+            environment,
+            later,
+        )
+        worklog.handle_event(
+            self.event(
+                "Stop",
+                turn_id="installed-package",
+                last_assistant_message=(
+                    "Пакет установлен.\n\n"
+                    "Причина/решение: После подтверждения PolicyKit установка "
+                    "продолжилась.\n"
+                    "Заменяет статус: package-ready → installed\n"
+                    "Проверено: Установленная версия 1.2 подтверждена.\n"
+                    "Артефакты: [отчёт](reports/install.md)"
+                ),
+            ),
+            environment,
+            later,
+        )
+
+        rendered = self.worklog_files()[0].read_text(encoding="utf-8")
+        self.assertEqual(rendered.count("codex-worklog-turn:"), 2)
+        self.assertIn(
+            "- Причина/решение: После подтверждения PolicyKit установка продолжилась.",
+            rendered,
+        )
+        self.assertIn(
+            "- Разблокирует: 11:15 — Установка заблокирована ожиданием PolicyKit",
+            rendered,
+        )
+        self.assertIn("- Заменяет статус: package-ready → installed", rendered)
+        self.assertIn("- Проверено: Установленная версия 1.2 подтверждена.", rendered)
+        self.assertIn("- Артефакты: [отчёт](../../../reports/install.md)", rendered)
+
     def test_acknowledgement_turn_adds_no_timeline_entry(self) -> None:
         self.start()
         diary = self.worklog_files()[0]
@@ -416,13 +926,14 @@ class WorklogHookTests(unittest.TestCase):
             self.environment,
             self.now,
         )
-        context = prompt_response["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("acknowledgement only", context)
-        self.assertNotIn("codex-worklog-turn:", context)
-        self.assertNotIn(str(WORKLOG_SCRIPT), context)
+        self.assertEqual(prompt_response, {})
 
         stop_response = worklog.handle_event(
-            self.event("Stop", turn_id="acknowledgement-turn"),
+            self.event(
+                "Stop",
+                turn_id="acknowledgement-turn",
+                last_assistant_message="You are welcome.",
+            ),
             self.environment,
             self.now,
         )
@@ -454,33 +965,85 @@ class WorklogHookTests(unittest.TestCase):
             self.environment,
             self.now,
         )
-        context = prompt_response["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("codex-worklog-turn:", context)
-        self.assertIn(str(WORKLOG_SCRIPT), context)
+        self.assertEqual(prompt_response, {})
 
         stop_response = worklog.handle_event(
-            self.event("Stop", turn_id="material-thanks-turn"),
+            self.event(
+                "Stop",
+                turn_id="material-thanks-turn",
+                last_assistant_message="README исправлен и проверен.",
+            ),
             self.environment,
             self.now,
         )
-        self.assertEqual(stop_response["decision"], "block")
+        self.assertEqual(stop_response, {})
+        rendered = self.worklog_files()[0].read_text(encoding="utf-8")
+        self.assertIn("README исправлен и проверен.", rendered)
 
-    def test_stop_continuation_does_not_loop(self) -> None:
+    def test_change_turn_records_a_fixed_state(self) -> None:
         self.start()
         worklog.handle_event(
-            self.event("UserPromptSubmit", turn_id="turn-two", prompt="status"),
+            self.event(
+                "UserPromptSubmit",
+                turn_id="recorded-state",
+                prompt="Зафиксируй второе состояние",
+            ),
             self.environment,
             self.now,
         )
 
         response = worklog.handle_event(
-            self.event("Stop", turn_id="turn-two", stop_hook_active=True),
+            self.event(
+                "Stop",
+                turn_id="recorded-state",
+                last_assistant_message="Второе состояние зафиксировано.",
+            ),
             self.environment,
             self.now,
         )
 
-        self.assertNotIn("decision", response)
-        self.assertIn("after one continuation", response["systemMessage"])
+        self.assertEqual(response, {})
+        rendered = self.worklog_files()[0].read_text(encoding="utf-8")
+        self.assertEqual(rendered.count("codex-worklog-turn:"), 1)
+        self.assertIn("Второе состояние зафиксировано.", rendered)
+
+    def test_stop_is_hook_owned_and_idempotent_when_already_active(self) -> None:
+        self.start()
+        worklog.handle_event(
+            self.event("UserPromptSubmit", turn_id="turn-two", prompt="update status"),
+            self.environment,
+            self.now,
+        )
+
+        response = worklog.handle_event(
+            self.event(
+                "Stop",
+                turn_id="turn-two",
+                stop_hook_active=True,
+                last_assistant_message="The status was updated and verified.",
+            ),
+            self.environment,
+            self.now,
+        )
+
+        self.assertEqual(response, {})
+        diary = self.worklog_files()[0]
+        marker = worklog._marker(worklog._token("turn-two"))
+        self.assertEqual(diary.read_text(encoding="utf-8").count(marker), 1)
+        self.assertEqual(
+            worklog.handle_event(
+                self.event(
+                    "Stop",
+                    turn_id="turn-two",
+                    stop_hook_active=True,
+                    last_assistant_message="The status was updated and verified.",
+                ),
+                self.environment,
+                self.now,
+            ),
+            {},
+        )
+        self.assertEqual(diary.read_text(encoding="utf-8").count(marker), 1)
 
     def test_prompt_requires_a_turn_id(self) -> None:
         response = worklog.handle_event(
@@ -495,18 +1058,27 @@ class WorklogHookTests(unittest.TestCase):
     def test_stop_uses_the_stored_turn_id_when_event_omits_it(self) -> None:
         self.start()
         worklog.handle_event(
-            self.event("UserPromptSubmit", turn_id="stored-turn", prompt="status"),
+            self.event(
+                "UserPromptSubmit", turn_id="stored-turn", prompt="install package"
+            ),
             self.environment,
             self.now,
         )
 
         response = worklog.handle_event(
-            self.event("Stop", stop_hook_active=False), self.environment, self.now
+            self.event(
+                "Stop",
+                stop_hook_active=False,
+                last_assistant_message="The package was installed.",
+            ),
+            self.environment,
+            self.now,
         )
 
-        self.assertEqual(response["decision"], "block")
+        self.assertEqual(response, {})
         self.assertIn(
-            worklog._marker(worklog._token("stored-turn")), response["reason"]
+            worklog._marker(worklog._token("stored-turn")),
+            self.worklog_files()[0].read_text(encoding="utf-8"),
         )
 
     def test_stop_early_exit_paths_are_safe(self) -> None:
@@ -518,11 +1090,20 @@ class WorklogHookTests(unittest.TestCase):
         )
         self.assertEqual(
             worklog.handle_event(
-                self.event("Stop", session="unknown", turn_id="turn"),
+                self.event(
+                    "Stop",
+                    session="unknown",
+                    turn_id="turn",
+                    last_assistant_message="Recovered without SessionStart.",
+                ),
                 self.environment,
                 self.now,
             ),
             {},
+        )
+        self.assertIn(
+            worklog._marker(worklog._token("turn")),
+            self.worklog_files()[0].read_text(encoding="utf-8"),
         )
         self.start()
         self.assertEqual(
@@ -538,7 +1119,7 @@ class WorklogHookTests(unittest.TestCase):
             {},
         )
 
-    def test_advisory_mode_warns_without_continuing(self) -> None:
+    def test_missing_final_message_warns_without_continuing(self) -> None:
         environment = {**self.environment, "CODEX_WORKLOG_ENFORCEMENT": "advisory"}
         worklog.handle_event(
             self.event("SessionStart", source="startup"), environment, self.now
@@ -556,26 +1137,32 @@ class WorklogHookTests(unittest.TestCase):
         )
 
         self.assertNotIn("decision", response)
-        self.assertIn("no entry for this turn", response["systemMessage"])
+        self.assertIn(
+            "did not include a final assistant message", response["systemMessage"]
+        )
 
     def test_session_end_only_closes_state_and_never_adds_diary_noise(self) -> None:
         self.start()
         first_prompt = worklog.handle_event(
-            self.event("UserPromptSubmit", turn_id="first-turn", prompt="status"),
+            self.event(
+                "UserPromptSubmit", turn_id="first-turn", prompt="update first state"
+            ),
             self.environment,
             self.now,
         )
-        first_marker = re.search(
-            r"<!-- codex-worklog-turn:[0-9a-f]{16} -->",
-            first_prompt["hookSpecificOutput"]["additionalContext"],
+        self.assertEqual(first_prompt, {})
+        self.assertEqual(
+            worklog.handle_event(
+                self.event(
+                    "Stop",
+                    turn_id="first-turn",
+                    last_assistant_message="First turn completed.",
+                ),
+                self.environment,
+                self.now,
+            ),
+            {},
         )
-        self.assertIsNotNone(first_marker)
-        if first_marker is None:
-            self.fail("first turn marker is missing")
-        first_append = self.append_with_helper(
-            self.worklog_files()[0], first_marker.group(0)
-        )
-        self.assertEqual(first_append.returncode, 0)
         end_event = self.event("SessionEnd", reason="other")
 
         self.assertEqual(
@@ -601,17 +1188,19 @@ class WorklogHookTests(unittest.TestCase):
             self.environment,
             self.now + timedelta(hours=1),
         )
-        second_marker = re.search(
-            r"<!-- codex-worklog-turn:[0-9a-f]{16} -->",
-            second_prompt["hookSpecificOutput"]["additionalContext"],
+        self.assertEqual(second_prompt, {})
+        self.assertEqual(
+            worklog.handle_event(
+                self.event(
+                    "Stop",
+                    turn_id="second-turn",
+                    last_assistant_message="Second turn completed.",
+                ),
+                self.environment,
+                self.now + timedelta(hours=1),
+            ),
+            {},
         )
-        self.assertIsNotNone(second_marker)
-        if second_marker is None:
-            self.fail("second turn marker is missing")
-        second_append = self.append_with_helper(
-            self.worklog_files()[0], second_marker.group(0)
-        )
-        self.assertEqual(second_append.returncode, 0)
         worklog.handle_event(
             end_event,
             self.environment,
@@ -631,19 +1220,19 @@ class WorklogHookTests(unittest.TestCase):
             self.environment,
             self.now,
         )
-        first_marker_match = re.search(
-            r"<!-- codex-worklog-turn:[0-9a-f]{16} -->",
-            first_response["hookSpecificOutput"]["additionalContext"],
-        )
-        self.assertIsNotNone(first_marker_match)
-        if first_marker_match is None:
-            self.fail("first resume marker is missing")
-        first_marker = first_marker_match.group(0)
+        self.assertEqual(first_response, {})
+        first_marker = worklog._marker(worklog._token("before-resume"))
         self.assertEqual(
-            self.append_with_helper(
-                diary, first_marker, title="Entry before resume"
-            ).returncode,
-            0,
+            worklog.handle_event(
+                self.event(
+                    "Stop",
+                    turn_id="before-resume",
+                    last_assistant_message="Entry before resume completed.",
+                ),
+                self.environment,
+                self.now,
+            ),
+            {},
         )
         worklog.handle_event(
             self.event("SessionEnd", reason="other"), self.environment, self.now
@@ -662,19 +1251,19 @@ class WorklogHookTests(unittest.TestCase):
             self.environment,
             self.now + timedelta(hours=1),
         )
-        second_marker_match = re.search(
-            r"<!-- codex-worklog-turn:[0-9a-f]{16} -->",
-            second_response["hookSpecificOutput"]["additionalContext"],
-        )
-        self.assertIsNotNone(second_marker_match)
-        if second_marker_match is None:
-            self.fail("second resume marker is missing")
-        second_marker = second_marker_match.group(0)
+        self.assertEqual(second_response, {})
+        second_marker = worklog._marker(worklog._token("after-resume"))
         self.assertEqual(
-            self.append_with_helper(
-                diary, second_marker, title="Entry after resume"
-            ).returncode,
-            0,
+            worklog.handle_event(
+                self.event(
+                    "Stop",
+                    turn_id="after-resume",
+                    last_assistant_message="Entry after resume completed.",
+                ),
+                self.environment,
+                self.now + timedelta(hours=1),
+            ),
+            {},
         )
         final_bytes = diary.read_bytes()
 
@@ -768,7 +1357,7 @@ class WorklogHookTests(unittest.TestCase):
             self.event("SessionStart", source="startup"), environment, self.now
         )
 
-        self.assertIn("unsafe to expose to the model", response["systemMessage"])
+        self.assertIn("unsupported unsafe characters", response["systemMessage"])
         self.assertEqual(list(self.workspace.iterdir()), [])
 
     @unittest.skipIf(
@@ -872,7 +1461,9 @@ class WorklogHookTests(unittest.TestCase):
                 '{"last_turn_requires_entry": "yes"}\n',
                 "invalid last_turn_requires_entry flag",
             ),
+            ('{"last_turn_intent": "../../change"}\n', "invalid last_turn_intent"),
             ('{"previous_worklog_path": 7}\n', "invalid previous worklog path"),
+            ('{"language": "../../ru"}\n', "invalid language"),
             (" " * (worklog.MAX_STATE_BYTES + 1), "too large"),
             (b"{\xff}".decode("latin1"), "unable to inspect regular file"),
         )
@@ -1019,6 +1610,12 @@ class WorklogHookTests(unittest.TestCase):
         cases.append((missing, "wrong schema"))
         unexpected = {**base, "prompt": "must not be persisted"}
         cases.append((unexpected, "unexpected fields: prompt"))
+        cases.append(
+            (
+                {**base, "changes": "This obsolete field must be rejected."},
+                "unexpected fields: changes",
+            )
+        )
         cases.append(({**base, "marker": "not-a-turn-marker"}, "marker is invalid"))
         cases.append(
             ({**base, "summary": "first line\nsecond line"}, "single safe line")
@@ -1026,8 +1623,64 @@ class WorklogHookTests(unittest.TestCase):
         cases.append(({**base, "next": ""}, "must be a non-empty string"))
         cases.append(
             (
-                {**base, "changes": "<!-- codex-worklog-session-end:9 -->"},
+                {**base, "reason": "<!-- codex-worklog-session-end:9 -->"},
                 "reserved marker",
+            )
+        )
+        cases.append(
+            (
+                {**base, "summary": "/home/example/private/project changed"},
+                "absolute local path",
+            )
+        )
+        cases.append(
+            (
+                {**base, "verification": "a" * 64},
+                "full SHA-256 digest",
+            )
+        )
+        cases.append(
+            (
+                {**base, "unblocks": "awaiting PolicyKit"},
+                "must reference a timestamp and title",
+            )
+        )
+        cases.append(
+            (
+                {**base, "supersedes_status": "ready -> installed"},
+                "must use previous → current",
+            )
+        )
+        cases.append(
+            (
+                {**base, "artifacts": "reports/verification.md"},
+                "must contain a Markdown link",
+            )
+        )
+        cases.append(
+            (
+                {
+                    **base,
+                    "artifacts": "[verification](reports/missing.md)",
+                },
+                "missing report",
+            )
+        )
+        cases.append(
+            (
+                {
+                    **base,
+                    "artifacts": (
+                        "[verification](https://account:credential@example.test/report)"  # pragma: allowlist secret
+                    ),
+                },
+                "unsafe external link",
+            )
+        )
+        cases.append(
+            (
+                {**base, "artifacts": "[verification](https://[invalid)"},
+                "invalid link",
             )
         )
         cases.append(
@@ -1078,9 +1731,7 @@ class WorklogHookTests(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 0)
         response = json.loads(completed.stdout)
-        self.assertEqual(
-            response["hookSpecificOutput"]["hookEventName"], "SessionStart"
-        )
+        self.assertEqual(response, {})
         self.assertEqual(completed.stderr, "")
         self.assertEqual(len(self.worklog_files()), 1)
 
@@ -1135,7 +1786,7 @@ class WorklogHookTests(unittest.TestCase):
             self.now,
         )
 
-        self.assertIn("unsafe model-context characters", response["systemMessage"])
+        self.assertIn("unsupported unsafe characters", response["systemMessage"])
         self.assertEqual(list(unsafe_workspace.iterdir()), [])
 
     def test_invalid_plugin_data_path_fails_visibly(self) -> None:

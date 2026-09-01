@@ -76,6 +76,25 @@ class RepositoryValidatorTests(unittest.TestCase):
 
         self.assert_validation_error("defaultPrompt must contain 1 to 3 strings")
 
+    def test_plugin_must_expose_the_context_recovery_skill(self) -> None:
+        relative = "plugins/codex-worklog/.codex-plugin/plugin.json"
+        manifest = self.read_json(relative)
+        manifest.pop("skills")
+        self.write_json(relative, manifest)
+
+        self.assert_validation_error("plugin skills must resolve to ./skills/")
+
+    def test_worklog_skill_is_confined_to_the_current_workspace(self) -> None:
+        skill = self.root / "plugins/codex-worklog/skills/worklog/SKILL.md"
+        text = skill.read_text(encoding="utf-8").replace(
+            "user-wide memory registries", "external registries"
+        )
+        skill.write_text(text, encoding="utf-8")
+
+        self.assert_validation_error(
+            "worklog skill must keep history recovery inside the current cwd"
+        )
+
     def test_marketplace_policy_and_category_are_validated(self) -> None:
         relative = ".agents/plugins/marketplace.json"
         marketplace = self.read_json(relative)
@@ -103,6 +122,16 @@ class RepositoryValidatorTests(unittest.TestCase):
         self.write_json(relative, hooks)
 
         self.assert_validation_error("Stop must contain exactly one command handler")
+
+    def test_model_context_output_is_rejected_for_lifecycle_hooks(self) -> None:
+        relative = "plugins/codex-worklog/hooks/hooks.json"
+        hooks = self.read_json(relative)
+        hooks["hooks"]["SessionStart"][0]["hooks"][0]["additionalContextLimit"] = 2200
+        self.write_json(relative, hooks)
+
+        self.assert_validation_error(
+            "SessionStart must not declare additionalContextLimit"
+        )
 
     def test_github_actions_must_use_full_commit_shas(self) -> None:
         workflow = self.root / ".github/workflows/ci.yml"
