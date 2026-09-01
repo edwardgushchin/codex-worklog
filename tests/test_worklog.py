@@ -217,6 +217,10 @@ class WorklogHookTests(unittest.TestCase):
             worklog._repository_identifier("/private/local/repository", "fallback"),
             "fallback",
         )
+        self.assertEqual(
+            worklog._repository_identifier(r"C:\private\local\repository", "fallback"),
+            "fallback",
+        )
 
     def test_russian_system_language_localizes_header_and_entry(self) -> None:
         environment = {
@@ -1648,7 +1652,7 @@ private memory details
         cases.append(
             (
                 {**base, "supersedes_status": "ready -> installed"},
-                "must use previous → current",
+                "must use U+2192 as the separator",
             )
         )
         cases.append(

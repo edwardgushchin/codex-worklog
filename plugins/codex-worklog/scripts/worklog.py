@@ -20,7 +20,7 @@ import tempfile
 import unicodedata
 from collections.abc import Mapping
 from datetime import datetime
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -421,7 +421,10 @@ def _repository_identifier(remote: str | None, fallback: str) -> str:
                 return fallback
             candidate = parsed.path
         else:
-            if Path(value).is_absolute() or PureWindowsPath(value).is_absolute():
+            if (
+                PurePosixPath(value).is_absolute()
+                or PureWindowsPath(value).is_absolute()
+            ):
                 return fallback
             candidate = value
     candidate = candidate.strip().strip("/")
@@ -1343,7 +1346,7 @@ def _validate_transition_fields(values: Mapping[str, str]) -> None:
         previous, separator, current = supersedes.partition("→")
         if not separator or not previous.strip() or not current.strip():
             raise WorklogError(
-                "append payload field supersedes_status must use previous → current"
+                "append payload field supersedes_status must use U+2192 as the separator"
             )
 
 
