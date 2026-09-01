@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-01
+
 ### Added
 
 - Added optional cause/decision, blocker-link, status-transition, and artifact
@@ -47,6 +49,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Confined requested worklog recovery to the current task `cwd` and prohibited
   the bundled skill from initiating global-memory or conversation-history
   searches; context recovery itself never re-appends historical fields.
+- Made POSIX absolute-path rejection independent of the host operating system
+  and kept append-validation diagnostics ASCII-safe on Windows.
 
 ### Security
 
@@ -114,5 +118,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Reject non-portable directory overrides, invalid hook paths, corrupt, oversized, or cross-workspace state, and sanitize control characters in model-visible metadata.
 - Reduced GitHub workflow token permissions and disabled checkout credential persistence.
 
-[Unreleased]: https://github.com/edwardgushchin/codex-worklog/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/edwardgushchin/codex-worklog/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/edwardgushchin/codex-worklog/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/edwardgushchin/codex-worklog/releases/tag/v0.1.0
