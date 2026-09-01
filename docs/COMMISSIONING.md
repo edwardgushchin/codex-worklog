@@ -144,7 +144,7 @@ canonical session path plus redaction of an absolute link target and a labelled
 API key. These direct installed-script checks do not replace a new Codex task
 proving that the host loaded and dispatched the refreshed hook definition.
 
-## Unreleased worklog-contract revision — 2026-08-31
+## v0.2.0 worklog-contract revision — 2026-08-31
 
 The 2026-08-31 source revision treated one resulting state change as the unit
 of an entry, added explicit blocker/status transition links and report

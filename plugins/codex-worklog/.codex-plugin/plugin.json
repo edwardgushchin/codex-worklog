@@ -1,6 +1,6 @@
 {
   "name": "codex-worklog",
-  "version": "0.1.0+codex.20260901114849",
+  "version": "0.2.0",
   "description": "Automatically append bounded local outcome summaries and recover task history when requested.",
   "author": {
     "name": "Eduard Gushchin",

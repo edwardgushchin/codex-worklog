@@ -45,7 +45,7 @@ body:
     attributes:
       label: Plugin version
       description: Provide the exact version or commit SHA.
-      placeholder: "0.1.0"
+      placeholder: "0.2.0"
     validations:
       required: true
 
