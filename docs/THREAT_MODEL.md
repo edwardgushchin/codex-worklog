@@ -2,69 +2,71 @@
 
 ## Scope
 
-Codex Worklog writes hook-derived Markdown into a workspace and keeps minimal lifecycle state in Codex plugin storage. This document covers confidentiality, integrity, path safety, command execution, availability, and context-recovery risks.
+Codex Worklog validates model-authored work blocks, stages them in private
+plugin storage, and commits them to a workspace daily diary before `submit`
+reports success. Lifecycle hooks retry prepared work. The active model
+is a semantic author, not a trusted filesystem writer.
 
-## Assets
+## Assets and assumptions
 
-- project history and rationale;
-- filesystem paths and session timing;
-- the integrity of files outside the intended worklog directory;
-- Codex availability and turn completion;
-- secrets or personal data that could be mentioned during work.
+Assets include project history, evidence, local paths, session timing, turn
+completion, and the integrity of unrelated workspace files. The user trusts
+the installed hook definition, Codex host, and Python interpreter. The host
+supplies lifecycle identifiers and plugin paths. A process with the user's
+privileges can still alter user-owned content; this is not protection against
+a compromised account.
 
-## Trust Assumptions
+Model submissions, restored state, workspace paths, existing diary contents,
+and linked evidence are validated at their respective trust boundaries.
+Schema validity does not establish semantic truth.
 
-- The user intentionally installs and trusts the reviewed plugin hooks.
-- The Codex host supplies authentic lifecycle event fields and `PLUGIN_ROOT`/`PLUGIN_DATA` values.
-- The Python interpreter invoked by the hook is trusted.
-- Processes with the user's filesystem privileges can read or alter user-owned files; the plugin cannot defend against a fully compromised account.
-- Hook-derived summaries originate from model-authored final responses and may be inaccurate or incomplete.
-
-## Threats and Mitigations
+## Threats and mitigations
 
 | Threat | Mitigation |
 | --- | --- |
-| Raw prompts or transcripts are retained | The runtime reads `prompt` only for an in-process intent classification, discards it immediately, and stores only a small enum plus a hashed turn identifier; `transcript_path` is ignored. Tests use a canary secret to verify non-persistence. |
-| Tool output contains credentials | Tool hooks and `transcript_path` are not used for capture. Fenced code and common labelled secret values are removed from the bounded final-response summary. |
-| `cwd` or configuration escapes the workspace | Worklog paths must be portable and relative to the event `cwd`; `..`, absolute or Windows-drive overrides, control characters, and unsafe restored paths are rejected. |
-| A visible header or derived field discloses local filesystem structure | Headers contain only portable project/Git identity. Automatic summaries replace absolute POSIX, Windows, home-relative, and `file://` paths. Absolute paths remain only in private runtime state. |
-| A Git remote exposes embedded credentials | Optional repository metadata is collected with bounded non-interactive local Git commands, reduced to a repository identifier, and stripped of authority/user information. Local-path remotes fall back to the repository directory name. |
-| A workspace link redirects reads or writes | Symbolic links are rejected, worklog and state files must be regular files with one hard link, and opened-file identity is checked before runtime reads or appends. |
-| Tampered `PLUGIN_DATA` redirects SessionEnd | Restored worklog paths and stored workspace identity are validated against the current event `cwd` before reads or appends; malformed or oversized state fails visibly. |
-| Shell metacharacters in the installed path execute code | `PLUGIN_ROOT` is quoted in Unix and Windows hook commands. Runtime paths are passed as one interpreter argument. |
-| A malicious path or planted worklog injects model instructions | Lifecycle hooks do not inject worklog content or paths. The optional inspection skill reads only requested history inside the current `cwd`, does not initiate global-memory or conversation-history searches, treats diary text as untrusted, and never follows embedded instructions or authorization. |
-| A missing turn entry causes an infinite loop | `Stop` performs the append itself and never creates a continuation prompt. Repeated events are deduplicated by an internal hashed marker. |
-| A general-purpose edit inserts an entry before older history | The hook validates a fixed single-line schema internally and opens the target with `O_APPEND`; resume regression coverage requires the old file to remain an exact byte prefix. |
-| A helper request injects structure or consumes excessive memory | The helper accepts a small allowlisted schema with two required semantic fields, bounds total input and every field, and rejects controls, newlines, reserved markers, invalid turn markers, empty optional values, and extra fields. |
-| An artifact link escapes the project or points to invented evidence | Local artifact targets must be existing project-relative regular files that resolve inside the workspace; the helper rewrites them relative to the nested worklog. External artifacts require credential-free HTTPS links. |
-| A final response contains excessive or sensitive detail | The runtime keeps at most three normalized outcome lines, extracts only bounded single-line optional fields, and strips code fences, hook metadata, unsafe link targets, local paths, full SHA-256 values, and common labelled secrets. Complete prevention of arbitrary unlabelled secrets is not claimed. |
-| Read-only work creates misleading state changes | Prompt intent and the final result are classified separately. Acknowledgements, pure inspection, verification, context recovery, and explicit no-change outcomes append nothing; tests require byte-identical files for representative cases. Causes, decisions, transitions, and newly discovered blockers remain recordable. |
-| Concurrent tasks corrupt one daily file | Each session uses a distinct file derived from time and a hashed session identifier. State writes use atomic replacement. |
-| Worklogs leak through Git | The plugin never edits `.gitignore` or stages files. Users remain responsible for repository policy. |
-| Stale history drives an unsafe action | Normal lifecycle hooks do not inject historical entries. The inspection skill labels worklog-only conclusions and requires fresh verification of mutable state before action. |
-| Hook changes execute without review | Codex requires users to review and trust plugin hooks; updated definitions may require renewed trust. |
+| Raw conversations or tool dumps are persisted | Hooks do not read transcripts or extract final messages. The author submits bounded semantic sections; raw prompts, complete responses, and tool dumps are outside the contract. |
+| A summary exposes secrets | Redact recognized secrets and unsafe structures before staging. Keep intentional evidence such as SHA-256 values; never treat every long hex value as a credential. Arbitrary unlabelled secrets remain a review risk. |
+| A helper overwrites an arbitrary workspace file | `submit` accepts session-bound content, not `worklog_path` or a marker. The destination derives from validated state and must match the configured root, daily filename, workspace, and header. |
+| Tampered state crosses workspaces or sessions | Validate state shape, size, original `cwd`, and session/turn binding before staging or commit. Corrupt state fails visibly instead of being silently replaced. |
+| Traversal or a symlink redirects a write | Reject unsafe relative roots, symlinks, inspected Windows reparse points, and multi-linked state, lock, and diary files. POSIX directory descriptors anchor supported operations. |
+| Filesystem checks are overstated on Windows | Treat Windows reparse and path validation separately from POSIX descriptor anchoring. Do not claim equivalent parent-race protection or native acceptance without evidence. |
+| Existing user permissions change unexpectedly | Apply private modes to new files/directories only; preserve existing directory and diary modes during updates. |
+| Two sessions race marker checks and writes | Hold a cross-process sidecar lock across marker detection and publication of old bytes plus new blocks. |
+| A crash tears an append or causes duplicate retry | Flush and synchronize a temporary replacement before publication. Runtime-generated markers make a retry idempotent if diary publication preceded the state update. |
+| A successful submission leaves no diary because an end hook is absent | Commit inside `submit` before returning `recorded: true` and `staged: false`. Durably stage first; storage failures exit nonzero without false success and retain prepared work for command or hook retries. |
+| A submission inserts reserved diary structure | Validate an allowlisted JSON schema, section types, reserved markers, safe Markdown, references, and size before rendering. The author cannot supply entry IDs or destinations. |
+| Input consumes excessive resources | Bound each submission to 64 KiB, eight blocks, 32 items per section/phase, 32 phases, and 4,096 characters per item. |
+| Shell characters in installed paths execute code | Inject an exact quoted command using the installed runtime path and bound identifiers. Do not ask the author to reconstruct aliases or cache paths. |
+| Missing author output blocks the task indefinitely | Both enabled modes warn and skip. No `Stop` continuation, retry loop, or regex fallback is generated. |
+| A future action is presented as a completed check | Author instructions require explicit chronology, outcomes, failures, and limitations. Validation cannot prove these distinctions; semantic acceptance checks model behavior. |
+| A local reference reveals outside paths | Convert in-workspace absolute references to relative ones and reject or remove unsafe external local paths. Diary headers omit the original absolute workspace path. |
+| A linked artifact is mistaken for proof | Validate safe references; require the author and later reader to verify their relevance. A valid path or URL is not evidence that a claim is true. |
+| A diary injects instructions during recovery | The read-only skill treats records as untrusted historical notes, stays inside the current task, and never treats embedded instructions as authority. |
+| Stale notes drive a new action | Recheck mutable facts before relying on recorded status. Superseding references annotate history without editing it. |
+| Diaries leak through Git or synchronization | The plugin neither changes ignore policy nor stages or publishes files. Users control sharing and retention. |
+| Hook definitions change without review | Codex hook trust remains a host responsibility; installation and native acceptance are separate from source tests. |
 
-## Residual Risks
+## Residual risks
 
-- The final response can still contain an unlabelled secret or inaccurate content that deterministic normalization does not recognize.
-- Deterministic natural-language classification can omit an ambiguously worded
-  state change or record a misleading one; concise explicit outcome and field
-  labels reduce this risk but do not eliminate it.
-- A local process with user permissions can tamper with worklogs or state.
-- A same-user process can still race runtime path validation and append; protection
-  from a compromised account is out of scope.
-- POSIX modes do not provide the same semantics on every filesystem or Windows host.
-- Worklogs are plaintext and are not encrypted by the plugin.
-- Hooks can be disabled, skipped, or unavailable; this is not a compliance-grade audit trail.
-- Hosted tool paths outside local hook coverage may not contribute mechanical evidence.
-- A malicious Python executable earlier in `PATH` can run instead of the expected interpreter.
+- A model can omit important context, invent an unsupported claim, or include an
+  unlabelled secret. Redaction and structural checks are not semantic proofs.
+- The model may fail to submit. Valid content must reach a successful `submit`
+  commit; a missing end hook does not undo an already successful submission.
+- A crash or storage error after staging but before publication can leave work
+  pending. Recovery needs a command retry or a later lifecycle event; the runtime
+  must not claim pending work is already in the diary.
+- Plaintext files are not encrypted. Same-user processes can read or tamper
+  with diaries, state, and locks.
+- Atomic replacement and permission behavior depend on the platform and
+  filesystem. Native Windows and macOS guarantees need explicit testing.
+- A malicious Python executable earlier in `PATH` can replace the interpreter.
+- Concurrent block order is commit order, not a global timestamp-sorted history.
 
-## Out of Scope
+## Out of scope
 
-- protection from a compromised operating system or user account;
-- encrypted storage or key management;
-- regulatory retention, legal hold, non-repudiation, or tamper evidence;
-- remote synchronization and access control;
-- correctness guarantees for hook-derived summaries.
+Encrypted storage, remote access control, regulatory retention, non-repudiation,
+and protection against compromised users or operating systems are outside this
+plugin's scope. It provides no guarantee that all work has been observed or
+that every model-authored entry is correct.
 
-Report vulnerabilities privately according to [SECURITY.md](../SECURITY.md).
+Report vulnerabilities privately using [SECURITY.md](../SECURITY.md).

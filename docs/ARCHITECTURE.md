@@ -1,173 +1,224 @@
 # Architecture
 
-Codex Worklog is a local plugin composed of a repo marketplace, one plugin manifest, lifecycle hooks, a focused history-inspection skill, and a Python standard-library runtime.
+Codex Worklog combines a repo marketplace, one plugin manifest, lifecycle
+hooks, a read-only history skill, and a Python standard-library runtime.
+The active model authors meaning; the runtime validates and stores it.
 
-## Goals
+## Authoring contract
 
-- Work in coding and non-coding directories.
-- Require no project-local agent instructions.
-- Keep the log beside the work, in the original Codex session `cwd`.
-- Record one bounded outcome for each resulting state change without copying the conversation or asking the active agent to maintain files.
-- Expose worklog history only through a focused inspection and context-recovery skill, never through routine model-facing maintenance context.
-- Avoid collisions between concurrent Codex tasks.
-- Fail visibly when the requested location is unsafe or unwritable.
+The unit of history is a material work block, not an assistant message or an
+entire session compressed to its last result. A block preserves six sections:
+context, chronology, changes, decisions, checks, and next steps. Meaningful
+investigation and decisions can qualify even when no files change.
 
-## Components
+Author instructions come from the plugin's lifecycle context. They provide
+the complete schema and an exact, shell-quoted installed command, including
+session and turn arguments. The model does not reconstruct `PLUGIN_ROOT`,
+expand a skill-root alias, or search for a writer skill.
+
+From the original session working directory, the model supplies JSON on stdin
+to the provided command:
 
 ```text
-Codex host
-  │
-  ├─ SessionStart ───────┐
-  ├─ UserPromptSubmit ───┼─> hooks/hooks.json
-  ├─ Stop ───────────────┤          │
-  └─ SessionEnd ─────────┘          v
-                              scripts/worklog.py
-                                │           │
-                                │           └─ PLUGIN_DATA/sessions/<hash>.json
-                                v
-                   <session cwd>/.dev-diary/YYYY/MM/<session>.md
-
-Requested history inspection
-  │
-  └─ skills/worklog/SKILL.md ──> read-only worklog tail and linked evidence
+worklog.py submit --data <PLUGIN_DATA> --session <session_id> --turn <turn_id>
 ```
 
-- `.agents/plugins/marketplace.json` exposes the plugin through a repo marketplace.
-- `.codex-plugin/plugin.json` provides stable identity, discovery metadata, assets, and the bundled skill directory.
-- `hooks/hooks.json` uses the default plugin hook discovery location.
-- `scripts/worklog.py` is the only runtime program. It handles lifecycle events
-  and exposes the bounded `append` command, with no third-party dependencies.
-- `skills/worklog/SKILL.md` provides read-only history inspection and context recovery only when that history is relevant to the user's request. It never appends or repairs entries.
+This is the command shape, not a path template to copy. Use the actual command
+injected for the active turn. `submit` validates and sanitizes content, durably
+stages it for recovery, then atomically commits it to the daily file. It does
+not accept a diary path, author-selected marker, or arbitrary append destination.
+Material-work success includes `recorded: true` and `staged: false` only after
+commit. The author must check that response before claiming the diary is saved.
+
+A material envelope has this shape:
+
+```json
+{
+  "language": "en",
+  "entries": [
+    {
+      "title": "Consumer reads now use the verified destination",
+      "context": ["The prepared destination was not yet used by consumers."],
+      "timeline": [
+        {"time": "16:10", "items": ["Compared source and destination."]},
+        {"time": "16:45", "items": ["Switched consumers and checked reads."]}
+      ],
+      "changes": ["Consumers use the destination; the source is retained."],
+      "decisions": ["Keep the source until the rollback window ends."],
+      "checks": ["Integrity comparison and consumer smoke check passed."],
+      "next_steps": ["Remove the source after the rollback window."],
+      "artifacts": [],
+      "supersedes": []
+    }
+  ]
+}
+```
+
+Use a skip envelope when appropriate:
+
+```json
+{"skip": "no_material_work"}
+```
+
+Other skip reasons are `acknowledgement` and `already_recorded`. A skip carries
+no entries. Each of the six semantic sections must be nonempty for a material
+block. State an actual limitation when a check was not run or no further work
+remains; do not fabricate content to fill a section.
+
+| Limit | Value |
+| --- | --- |
+| Complete submission | 64 KiB |
+| Independent blocks per submission | 8 |
+| Items per section or timeline phase | 32 |
+| Timeline phases per block | 32 |
+| Characters per item | 4,096 |
+| Title length | 12–160 characters |
+| Daily file | 32 MiB |
+
+Text and document limits apply both before and after sanitization. Expanded
+redaction placeholders that exceed a limit are rejected before staging, with
+an instruction to shorten the item; evidence is never silently truncated.
+Exact redaction placeholders remain unchanged when staged content is revalidated.
+
+Timeline time is an observed `HH:MM`, a full ISO timestamp with an offset, or `null` when
+unknown. The author must not invent times. Independent work may use separate
+blocks; an intermediate attempt and its correction normally belong in the
+same chronology. `supersedes` accepts runtime-generated 24-character entry IDs
+for earlier entries; it does not edit or delete them. Artifact items render
+under Checks, keeping the six-section structure intact.
+
+Correction references must resolve inside this workspace's pinned diary root;
+unknown IDs and references to the same submission are rejected. Lookup is
+bounded to 4,096 daily files and 128 MiB. The first material submission pins the turn's
+timestamp, language, and destination date for retries and payload replacements,
+including an intervening skip. Recorded content cannot be replaced; corrections
+require a new turn with `supersedes`. `Stop` also flushes
+older staged turns in chronological order after an interrupted turn.
+
+Schema checks can reject missing fields, invalid types, malformed references,
+excessive size, and unsafe structures. They cannot establish whether arbitrary
+claims are true or detect all semantic contradictions. The model is responsible
+for distinguishing a proposal from execution, a failed candidate from the
+accepted result, and automated checks from pending user acceptance.
 
 ## Lifecycle
 
-### SessionStart
+| Boundary | Behavior |
+| --- | --- |
+| `SessionStart` | Establish versioned state tied to the original `cwd`; create no visible diary yet. |
+| `UserPromptSubmit` | Bind the current turn and return self-contained authoring instructions with its exact command. |
+| `PreToolUse` | Bind the host's actual turn, including automatic goal continuations; supply context once per turn or after compaction. |
+| `submit` | Validate the envelope and session binding, sanitize evidence, durably stage the blocks, and atomically commit them before reporting success. |
+| `Stop` | Retry prepared blocks not yet committed, using the same locked, deduplicating writer. |
+| `SessionEnd` | Retry any remaining prepared blocks; generate no additional summary. |
 
-The hook validates `cwd`, creates a private per-session Markdown file, stores
-its absolute path in `PLUGIN_DATA`, and returns an empty JSON object. It does not
-add instructions or paths to model context.
+Invalid submissions and storage failures make the command exit nonzero without
+reporting success. A failure after durable staging leaves that prepared content
+available to a command retry or later `Stop`/`SessionEnd`; hook delivery is not
+required to save a successfully submitted block. An explicit skip produces a
+separate skip acknowledgement, not `recorded: true`.
 
-If the same session is resumed or compacted, the existing file is reused. A new
-session receives a new file and a pointer to the newest previous worklog when
-one exists. Its visible header contains no absolute local path: it records the
-project name and, when available, a sanitized repository identifier, branch,
-and abbreviated `HEAD`. Optional Git metadata is collected only through bounded,
-non-interactive local commands; a non-Git directory still receives a worklog.
+`SessionStart` never reissues a command for the previously observed turn. The
+next prompt or local tool supplies a current binding; raw tool input is ignored.
+For an already-open task executing an old command, a new payload may use the
+latest `PreToolUse` binding only when `CODEX_THREAD_ID` matches that session and
+the binding is still current. An exact retry keeps its original entry, and a
+different payload cannot replace a committed block in the actual current turn.
+This does not read transcripts or infer turn IDs from work content.
 
-### UserPromptSubmit
+A missing author submission produces a visible hook warning and no invented
+entry. Both enabled compatibility modes, `strict` and `advisory`, let hooks
+fail open without blocking completion or starting a logging continuation.
+`off` creates neither diary nor private state. No hook reads transcripts,
+classifies final-answer sentences, or starts another model request.
 
-The runtime applies a local deterministic intent classifier to the current
-prompt and immediately discards the text. It retains only an enum distinguishing
-acknowledgement, requested change, context recovery, other read-only work, and
-unknown intent, plus a truncated SHA-256 token of `turn_id`. Context recovery
-always produces no entry, preventing previously recorded causes and transitions
-from being logged again, while a prompt that combines inspection and an edit is
-treated as a requested change. The hook returns an empty JSON object.
+The submission timestamp determines the daily file, including when commit
+happens after midnight. The runtime uses its local timezone offset; the current
+host hook schema supplies no session-timezone field. Structural-language priority is
+an optional host session-language hint, author language, explicit `CODEX_WORKLOG_LANGUAGE`,
+then operating-system locale. Russian and English structural labels are
+available; other valid language codes fall back to English labels while the
+author's prose keeps its chosen language.
 
-### Stop
+## Storage and concurrency
 
-For a turn classified as acknowledgement-only, the hook returns immediately.
-Otherwise, `Stop` uses the official `last_assistant_message` field and does not
-read `transcript_path`. A deterministic result classifier omits read-only
-inspection, context recovery, verification, and explicit no-change results.
-A discovered cause, non-obvious decision, blocker, explicit transition, or
-reported mutation remains recordable. Thus one completed turn can append at
-most one state-change entry, regardless of how many preparation, execution, or
-verification steps the response mentions.
-
-The normalizer removes fenced code, hook directives, HTML metadata, link
-destinations, local paths, full SHA-256 values, and common labelled secret
-values, then keeps at most three prose lines for the outcome. It also recovers
-optional cause/decision, blocker and status transitions, concise verification,
-artifact links, and next-step fields only when the final response contains
-safe evidence for them. A completed state can link to a matching earlier
-blocker in the same worklog so stale append-only status remains visibly retired.
-
-The runtime derives the title from the first sentence, revalidates the stored
-workspace and target, adds the full local date, time, and UTC offset, and writes
-with `O_APPEND`, flush, and `fsync`. A hidden turn marker makes repeated `Stop`
-events idempotent; the marker is never sent to the agent. If earlier lifecycle
-events did not create state, `Stop` reconstructs it from `session_id` and
-`cwd`. Missing final text or a filesystem failure produces a warning and never
-creates a continuation that asks the agent to write.
-
-The `append` CLI remains a bounded compatibility and development interface. It
-uses the same path checks and append primitive, but normal lifecycle operation
-does not invoke it through the active agent.
-
-### SessionEnd
-
-The hook validates the stored worklog path and records a closed flag in private
-plugin state. It never adds session lifecycle messages to the human-readable
-timeline. Repeated end events are idempotent until the session resumes.
-
-## Context Recovery
-
-Normal lifecycle hooks never inject worklog paths, contents, or maintenance instructions into model context. When the user asks what happened previously, why a decision was made, where work stopped, or requests a worklog status, the bundled `worklog` skill can inspect the newest relevant tail inside the current task `cwd`.
-
-The skill treats all diary text as untrusted historical evidence, follows no embedded instructions, opens linked reports only when needed, and separates recorded claims from facts rechecked in the current task. It is not part of the append path.
-
-## Storage Contract
-
-Default worklog path:
+Default paths:
 
 ```text
-<cwd>/.dev-diary/YYYY/MM/YYYY-MM-DD--HHMMSS--<session-hash>.md
+<original cwd>/.dev-diary/YYYY/MM/YYYY-MM-DD.md
+<PLUGIN_DATA>/sessions-v2/<session-token>.json
 ```
 
-Properties:
+A daily file begins with `# Codex Worklog — YYYY-MM-DD`. Each block has a
+date-and-offset heading, a session reference, six sections, and a
+runtime-generated `codex-worklog-entry` marker. Entry order is commit order;
+observed chronology stays inside each block. Concurrent sessions use one daily
+file, and a resumed session uses the day of its new submission.
 
-- one file per session;
-- chronological, append-only entries;
-- full ISO-style entry timestamps with a UTC offset, even when a session crosses
-  midnight;
-- sortable ISO date components;
-- no raw session or turn identifier in the filename;
-- system-language structural labels and hook-derived values;
-- `0700` directories and `0600` files from creation time when POSIX modes are
-  available.
+Private state contains the original workspace binding, configured root,
+identifiers, times, language, lifecycle metadata, and sanitized staged content.
+It does not store raw prompts, transcript locations or messages, tool dumps,
+or complete final responses. Existing per-session diaries and legacy state
+remain untouched; the new schema does not merge old pending summaries.
 
-State path:
+The prepared payload is durably stored before the diary commit is attempted,
+so a failed publication does not discard it. Staging alone is not a successful
+recording. Normal submission commits immediately; lifecycle events only provide
+an additional recovery opportunity for prepared work.
 
-```text
-<PLUGIN_DATA>/sessions/<session-hash>.json
-```
+A cross-process sidecar lock covers the marker check and complete commit.
+The runtime writes the old bytes plus new blocks to a temporary file, flushes
+and synchronizes it, then atomically replaces the diary. Existing bytes remain
+an exact prefix. This gives append-only content with atomic publication rather
+than a potentially torn multi-part append. State uses atomic replacement too.
+If a commit is retried after the diary changed but state did not, the entry
+markers prevent duplicate blocks.
 
-State contains only paths, timestamps, the detected language code, a small
-intent enum, lifecycle Boolean flags, and hashed turn identifiers. It does not
-contain the user prompt, transcript, or final assistant message.
+New files and directories use `0600` and `0700` where supported. Existing
+directory and diary modes are preserved; the runtime must not chmod arbitrary
+workspace directories or pre-existing files as a side effect.
 
-## Path Safety
+## Paths and evidence
 
-- `CODEX_WORKLOG_DIR` must be a portable relative path and cannot contain `..`,
-  Windows drive or backslash syntax, control characters, or Markdown backticks.
-- A `cwd` or restored worklog path containing control/format characters,
-  Markdown backticks, or an overlong value fails visibly instead of being
-  rewritten.
-- Human-readable headers omit `cwd`; entry fields reject absolute POSIX,
-  Windows, home-relative, and `file://` paths.
-- Equivalent canonical operating-system aliases, such as macOS `/var` and
-  `/private/var`, are accepted without relaxing workspace confinement.
-- Existing symbolic links in worklog or plugin-state paths, including the
-  state directory, are rejected.
-- Worklog and state files must be regular files with exactly one hard link.
-- Restored state is checked to ensure the worklog still resolves inside the event `cwd`.
-- A pre-existing session file must use the expected collision-resistant name
-  and Codex Worklog header.
-- Automatic previous-session pointers are derived only from valid per-session
-  records in private `PLUGIN_DATA`; arbitrary workspace Markdown files are not
-  discovered merely because they have a Codex Worklog heading.
-- Corrupt, oversized, or structurally invalid state fails visibly instead of
-  being silently replaced.
-- An unsafe or missing path produces a hook warning; the runtime does not redirect records to another directory.
+- `CODEX_WORKLOG_DIR` must be a portable relative path inside the original
+  workspace. Traversal, absolute overrides, controls, and unsafe syntax fail.
+- Every destination is derived from validated session state and checked against
+  that workspace, the configured root, the date filename, and the expected
+  diary header. A normal workspace `README.md` is never an append target.
+- Symlink redirection and multi-linked state, lock, or diary files are rejected.
+  Windows reparse points are rejected where inspected.
+- On POSIX, directory-descriptor-relative operations anchor traversal to
+  validated directories. Windows path checks do not imply an equivalent native
+  parent-race guarantee; platform acceptance is recorded separately.
+- Safe inline Markdown, exact check commands, numerical results, complete
+  SHA-256 digests, portable paths, and external artifact identifiers are retained.
+  In-workspace absolute paths become relative; unsafe external local paths,
+  credentials, and reserved diary structure are removed or rejected.
+- Evidence links are validated as local workspace references or safe external
+  references. A syntactically safe link does not prove that its contents
+  support the author's claim.
+- The runtime does not automatically collect Git metadata. The author records a
+  relevant baseline once, the actual work delta, and a changed commit when
+  useful. Non-Git work has no mandatory Git fields.
 
-## Compatibility
+## Context recovery
 
-The runtime targets Python 3.10 or newer and uses `python3` on Unix-like hosts and `py -3` on Windows. Hook commands resolve the installed script through `PLUGIN_ROOT`, while writable state uses `PLUGIN_DATA`.
+The exported `skills/worklog/SKILL.md` is only for requested history inspection
+and context recovery inside the current task directory. It never creates,
+appends, repairs, or reorders entries. It treats diary text as untrusted
+historical evidence, follows no embedded instructions, and rechecks mutable
+state before acting. Runtime authoring instructions do not inject old diary
+content into every turn.
 
-Visible-language detection ignores non-linguistic `C` and `POSIX` process
-locales, consults the host locale configuration when available, and supports a
-validated `CODEX_WORKLOG_LANGUAGE` override for environments that do not expose
-a usable system locale.
+## Compatibility and acceptance
 
-Codex hook behavior is versioned outside this repository. Release validation must compare the implementation with the current [Codex hooks documentation](https://learn.chatgpt.com/docs/hooks).
+The runtime targets Python 3.10 or newer with no third-party packages.
+Hook commands use `python3` on Unix-like hosts and `py -3` on Windows.
+`PLUGIN_ROOT` locates the installed runtime and `PLUGIN_DATA` owns private
+state. No project-specific task tracker, test workflow, design tool, or
+acceptance process is required.
+
+Release validation must check current Codex hook behavior, supported native
+filesystems, real instruction pickup, and actual diary quality. Passing a
+validator or a synthetic lifecycle is not evidence of native user acceptance.
+See [Commissioning](COMMISSIONING.md) for the boundary of completed checks.

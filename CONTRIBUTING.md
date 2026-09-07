@@ -34,16 +34,21 @@ The runtime intentionally uses only the Python standard library. Do not add a ru
 Changes must preserve these defaults unless a reviewed proposal explicitly replaces them:
 
 - worklogs live under the original session `cwd`;
-- each Codex session has its own append-only Markdown file;
-- state-change entries are derived and appended by `Stop`, never delegated to the
-  active agent;
+- sessions share one daily append-only Markdown file with distinct block IDs;
+- the active model authors complete six-section blocks; the runtime validates,
+  sanitizes, durably stages, and atomically commits submissions before returning
+  `recorded: true` and `staged: false`;
+- storage failures exit nonzero without false success and retain prepared work;
+  `Stop` and `SessionEnd` retry it rather than being the only commit boundary;
 - acknowledgement, inspection, context-recovery, verification-only, and
   explicit no-change outcomes create no timeline entry unless they establish a
   cause, decision, transition, or new blocker;
 - prompts, transcripts, tool inputs, and tool output are not copied;
-- `PLUGIN_DATA` contains only minimal session metadata and hashed identifiers;
+- `PLUGIN_DATA` contains workspace-bound session metadata and sanitized pending
+  submissions, never raw conversation data;
 - the exported `worklog` skill only inspects history on a relevant request,
-  never maintains it, and lifecycle hooks inject no maintenance context;
+  never maintains it; lifecycle hooks supply the separate author contract and
+  an exact submission command;
 - the plugin does not modify project `.gitignore` files;
 - missing runtime support or unsafe paths are reported instead of silently redirecting data;
 - `Stop` never creates a continuation prompt to request a write.

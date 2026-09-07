@@ -1,35 +1,65 @@
-# Codex Worklog
+# Codex Worklog — 2026-09-04
 
-- Started: 2026-08-30T23:52:00+03:00
-- Project: `example-project`
-- Repository: `example/example-project`
-- Branch: `main`
-- HEAD: `4f21a690c312`
+## 2026-09-04 16:51 +03:00 — Migration verified; consumers switched with rollback retained
 
-## Timeline
+<!-- codex-worklog-session:example-session turn:example-turn -->
 
-### 2026-08-30T23:56+03:00 — Migration is awaiting approval
+### Context
 
-- Outcome: The reversible migration plan is ready, but consumers remain on the source until approval. Copy, verify, then switch was selected so the source remains available for rollback.
+- Illustrative example, not a report of a production migration. The user needs
+  to move a report archive without losing attachments or breaking consumers.
+- The source remains authoritative until both integrity and the consumer path
+  are verified. Copying files alone is insufficient evidence of completion.
 
-<!-- codex-worklog-turn:0123456789abcdef -->
+### Timeline
 
-### 2026-08-31T00:18+03:00 — Migration completed and accepted
+- `14:10`
+  - Established the source baseline: 120 reports and 34 attachment files.
+  - Recorded relative filenames, sizes and SHA-256 digests before copying.
+- `14:27`
+  - Rejected the first copy: the manifest comparison found one missing
+    attachment. A successful report-count check had not covered attachments.
+  - Identified the exclusion pattern responsible and corrected the copy scope.
+- `16:45`
+  - Repeated the copy and the complete manifest comparison: all 154 files matched.
+  - Switched the example consumer, opened a report with its attachment, and
+    confirmed that rollback could still select the unchanged source.
 
-- Outcome: Consumers now use the verified destination, while the unchanged source remains available for rollback. The integrity comparison and consumer smoke check passed.
+### Changes
 
-<!-- codex-worklog-turn:fedcba9876543210 -->
+- The example consumer now reads from the verified destination. The original
+  archive was not removed or modified.
+- The verification procedure now includes attachments rather than only reports.
+- No repository commit or production rollout occurred in this illustrative
+  scenario; Git metadata does not apply.
 
----
+### Decisions
 
-This is a sanitized illustration for a system using English. On a Russian
-system, structural field labels are rendered in Russian.
+- Retained the source through the agreed retention window to keep rollback
+  reversible. Immediate deletion would remove that fallback without a need.
+- Rejected report counts as the sole gate: the first candidate passed that
+  check while still missing an attachment.
+- Used filenames, byte sizes and full digests for integrity, then a consumer
+  smoke check for usability. Neither check substitutes for the other.
 
-Each entry was derived automatically from at most three safe prose lines of the
-final assistant response. The lifecycle hook added the timestamp and internal
-turn marker and appended the entry without exposing a maintenance instruction
-to the active agent. The example intentionally contains no code block, local
-path, link target, or full response transcript.
+### Checks
 
-The paths, identifiers, and events are fictional. A prompt consisting only of
-an acknowledgement such as `Thanks!` or `Спасибо!` is intentionally absent.
+- First candidate: 120/120 reports, 33/34 attachments; FAILED. This candidate
+  was not selected as the active destination.
+- Final candidate: 154/154 filenames, byte sizes and SHA-256 values matched.
+- Example evidence digest:
+  `8d8c693225ab99c04fae20b66ea444cd35c0ba2ba388a1e9901de443a1423d71`.
+- Consumer smoke: one report and its attachment opened from the destination;
+  rollback selection still resolved to the source. This does not demonstrate
+  that every consumer has been manually exercised.
+- [Illustrative verification report](reports/MIGRATION_VERIFICATION.md).
+  All names, events, counts and identifiers here are fictional.
+
+### Next steps
+
+- Keep the source until the agreed retention window ends. Before deletion,
+  confirm destination use and obtain the required authorization.
+- If a consumer reports a regression, select the retained source and investigate
+  that consumer; do not repeat the migration blindly.
+
+<!-- codex-worklog-entry:0123456789abcdef01234567 -->

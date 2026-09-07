@@ -1,5 +1,5 @@
 {
-  "description": "Create, maintain, and verify a semantic workspace-local Codex worklog.",
+  "description": "Provide authoring instructions and safely commit model-authored daily work blocks.",
   "hooks": {
     "SessionStart": [
       {
@@ -10,13 +10,26 @@
             "command": "python3 -B \"$PLUGIN_ROOT/scripts/worklog.py\"",
             "commandWindows": "py -3 -B \"%PLUGIN_ROOT%\\scripts\\worklog.py\"",
             "timeout": 5,
-            "statusMessage": "Preparing the workspace worklog"
+            "statusMessage": "Preparing worklog authoring instructions"
           }
         ]
       }
     ],
     "UserPromptSubmit": [
       {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -B \"$PLUGIN_ROOT/scripts/worklog.py\"",
+            "commandWindows": "py -3 -B \"%PLUGIN_ROOT%\\scripts\\worklog.py\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": ".*",
         "hooks": [
           {
             "type": "command",
@@ -35,7 +48,7 @@
             "command": "python3 -B \"$PLUGIN_ROOT/scripts/worklog.py\"",
             "commandWindows": "py -3 -B \"%PLUGIN_ROOT%\\scripts\\worklog.py\"",
             "timeout": 5,
-            "statusMessage": "Recording the completed turn"
+            "statusMessage": "Saving the authored work blocks"
           }
         ]
       }
