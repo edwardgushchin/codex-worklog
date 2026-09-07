@@ -25,7 +25,7 @@ SEMVER = re.compile(
     r"(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?"
     r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
 )
-MARKDOWN_LINK = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
+MARKDOWN_LINK = re.compile(r"!?\[[^\]]*\]\((<[^>\n]+>|[^)\n]+)\)")
 PLUGIN_NAME = re.compile(r"^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$")
 BRAND_COLOR = re.compile(r"^#[0-9A-Fa-f]{6}$")
 ACTION_REFERENCE = re.compile(r"^\s*uses:\s*[^@\s]+@([^\s#]+)", re.MULTILINE)
@@ -73,6 +73,7 @@ REQUIRED_FILES = {
     "plugins/codex-worklog/scripts/worklog.py",
     "plugins/codex-worklog/skills/worklog/SKILL.md",
     "scripts/validate_repository.py",
+    "tests/test_storage_security.py",
     "tests/test_validate_repository.py",
     "tests/test_worklog.py",
 }
@@ -233,7 +234,7 @@ def validate_hooks(errors: list[str]) -> None:
     if not _nonempty_string(hooks_document.get("description")):
         errors.append("hooks description must be a non-empty string")
     hooks = hooks_document.get("hooks")
-    expected_events = {"SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"}
+    expected_events = {"SessionStart", "UserPromptSubmit", "PreToolUse", "Stop", "SessionEnd"}
     if not isinstance(hooks, dict) or set(hooks) != expected_events:
         errors.append("hook lifecycle events do not match the required contract")
         return
@@ -253,7 +254,9 @@ def validate_hooks(errors: list[str]) -> None:
                 errors.append(
                     "SessionStart matcher must cover startup, resume, clear, and compact"
                 )
-            if event_name != "SessionStart" and "matcher" in group:
+            if event_name == "PreToolUse" and group.get("matcher") != ".*":
+                errors.append("PreToolUse matcher must cover all local tools")
+            if event_name not in {"SessionStart", "PreToolUse"} and "matcher" in group:
                 errors.append(f"{event_name} must not declare an unused matcher")
             handlers = group.get("hooks") if isinstance(group, dict) else None
             if not isinstance(handlers, list) or not handlers:
@@ -287,8 +290,9 @@ def validate_hooks(errors: list[str]) -> None:
                         f"{event_name} timeout must be exactly {expected_timeout} seconds"
                     )
                 if "additionalContextLimit" in handler:
+                    # Author context is runtime output, not a registration limit.
                     errors.append(
-                        f"{event_name} must not declare additionalContextLimit"
+                        f"{event_name} reviewed hook registration excludes additionalContextLimit"
                     )
                 if handler.get("async") is True:
                     errors.append(f"{event_name} must run synchronously")
@@ -375,7 +379,8 @@ def validate_internal_links(errors: list[str]) -> None:
             continue
         text = path.read_text(encoding="utf-8")
         for raw_target in MARKDOWN_LINK.findall(text):
-            target = raw_target.strip().split("#", 1)[0]
+            target = raw_target.strip().removeprefix("<").removesuffix(">")
+            target = target.split("#", 1)[0]
             if not target or target.startswith(("#", "http://", "https://", "mailto:")):
                 continue
             resolved = (path.parent / target).resolve()

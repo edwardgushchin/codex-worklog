@@ -1,7 +1,7 @@
 {
   "name": "codex-worklog",
-  "version": "0.2.0",
-  "description": "Automatically append bounded local outcome summaries and recover task history when requested.",
+  "version": "0.3.0",
+  "description": "Preserve model-authored context, decisions, checks, and next steps in a daily local worklog.",
   "author": {
     "name": "Eduard Gushchin",
     "email": "eduardgushchin@yandex.ru",
@@ -20,8 +20,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Codex Worklog",
-    "shortDescription": "Local what, when, and why for every task",
-    "longDescription": "Lifecycle hooks maintain an append-only semantic worklog without active-agent maintenance; a focused skill can inspect that history when context recovery is requested.",
+    "shortDescription": "Complete work blocks in a daily diary",
+    "longDescription": "The working model authors structured context, chronology, changes, decisions, checks, and next steps. Hooks validate and commit daily append-only notes; the read-only skill recovers local history.",
     "developerName": "Eduard Gushchin",
     "category": "Productivity",
     "capabilities": [

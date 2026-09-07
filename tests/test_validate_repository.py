@@ -68,6 +68,39 @@ class RepositoryValidatorTests(unittest.TestCase):
 
         self.assert_validation_error("required file is missing")
 
+    def test_storage_security_tests_are_required(self) -> None:
+        (self.root / "tests/test_storage_security.py").unlink()
+
+        self.assert_validation_error(
+            "required file is missing: tests/test_storage_security.py"
+        )
+
+    def test_angle_links_support_spaces_parentheses_and_fragments(self) -> None:
+        report = self.root / "examples/reports/Verified result (final).md"
+        report.write_text("# Evidence\n", encoding="utf-8")
+        example = self.root / "examples/EXAMPLE_WORKLOG.md"
+        example.write_text(
+            "[Report](<reports/Verified result (final).md#L1>)\n"
+            "[README](../README.md#L1)\n"
+            "[Section](#L1)\n"
+            "[Section in angles](<#L1>)\n",
+            encoding="utf-8",
+        )
+
+        completed = self.run_validator()
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_angle_links_cannot_escape_the_repository(self) -> None:
+        outside = self.root.parent / "outside report.md"
+        outside.write_text("# Outside\n", encoding="utf-8")
+        example = self.root / "examples/EXAMPLE_WORKLOG.md"
+        example.write_text(
+            "[Outside](<../../outside report.md#L1>)\n", encoding="utf-8"
+        )
+
+        self.assert_validation_error("contains a broken local link")
+
     def test_default_prompt_must_be_a_bounded_string_array(self) -> None:
         relative = "plugins/codex-worklog/.codex-plugin/plugin.json"
         manifest = self.read_json(relative)
@@ -123,14 +156,21 @@ class RepositoryValidatorTests(unittest.TestCase):
 
         self.assert_validation_error("Stop must contain exactly one command handler")
 
-    def test_model_context_output_is_rejected_for_lifecycle_hooks(self) -> None:
+    def test_pretool_hook_must_match_all_local_tools(self) -> None:
+        relative = "plugins/codex-worklog/hooks/hooks.json"
+        hooks = self.read_json(relative)
+        hooks["hooks"]["PreToolUse"][0]["matcher"] = "Bash"
+        self.write_json(relative, hooks)
+        self.assert_validation_error("PreToolUse matcher")
+
+    def test_unsupported_context_limit_in_hook_registration_is_rejected(self) -> None:
         relative = "plugins/codex-worklog/hooks/hooks.json"
         hooks = self.read_json(relative)
         hooks["hooks"]["SessionStart"][0]["hooks"][0]["additionalContextLimit"] = 2200
         self.write_json(relative, hooks)
 
         self.assert_validation_error(
-            "SessionStart must not declare additionalContextLimit"
+            "SessionStart reviewed hook registration excludes additionalContextLimit"
         )
 
     def test_github_actions_must_use_full_commit_shas(self) -> None:

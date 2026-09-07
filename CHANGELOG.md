@@ -6,6 +6,61 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-08
+
+### Changed
+
+- Replace final-answer and commentary classification with active-model authored
+  work blocks containing context, chronology, changes, decisions, checks, and
+  next steps. Sections retain bounded lists instead of flattened sentences.
+- Supply universal authoring instructions and an exact installed `submit`
+  command in lifecycle context. The read-only history skill stays separate.
+- Validate and durably stage JSON submissions, then atomically commit them
+  inside `submit` to one daily file; `Stop` and `SessionEnd` retry prepared work.
+- Preserve failed attempts, explicit superseding references, evidence links,
+  exact commands, numerical results, SHA-256 digests, and safe relative paths.
+  In-workspace absolute paths become relative references.
+- Prefer host session language and the author's language before an explicit
+  override or operating-system locale. Remove automatic Git status/HEAD fields.
+- Keep old diaries and legacy private state unchanged while new submissions
+  use a separate `sessions-v2` schema.
+
+### Fixed
+
+- Preserve public evidence paths beneath canonical workspace ancestors such as
+  macOS `/private/var`, while still redacting project-relative private paths.
+  Use canonical temporary test roots for macOS aliases and Windows short names.
+- Keep exact redaction placeholders stable during staged-content revalidation.
+  Enforce text limits after sanitization before staging, preserving any earlier
+  prepared submission and avoiding a payload that cannot be committed.
+- Bind automatic goal continuations through `PreToolUse` and refresh author
+  context after compaction instead of reusing the first user turn. Safely map
+  stale commands from the same live host session to its current bound turn;
+  preserve exact retries and immutable committed blocks.
+- Return `recorded: true` and `staged: false` only after `submit` commits the
+  daily diary, so a missing end hook cannot leave a successful submission
+  unwritten. Storage failures exit nonzero without false success and retain
+  prepared blocks for command or hook retries.
+- Avoid empty diaries by creating a daily file only when a material block is
+  committed. Acknowledgements and already-recorded work use explicit skips.
+- Warn and skip when an author payload is missing; do not fabricate a fallback
+  from short replies or start a logging continuation.
+- Remove the author's need to reconstruct skill aliases and cache paths.
+- Serialize marker detection and daily commits across concurrent sessions;
+  publish complete replacements while preserving all previous bytes.
+
+### Security
+
+- Derive write targets only from validated session state; reject arbitrary
+  caller-selected diary paths and markers, wrong headers, symlinks, and
+  multi-linked files. Anchor supported POSIX traversal to directory descriptors.
+- Preserve existing directory and diary permissions; private modes apply to
+  newly created objects.
+- Validate and redact bounded payloads before staging. Hooks no longer read
+  transcripts or retain raw prompts, tool dumps, or complete assistant messages.
+- Document that schema checks cannot prove semantic truth or detect every
+  secret, and keep native platform acceptance separate from source validation.
+
 ## [0.2.0] - 2026-09-01
 
 ### Added
@@ -118,6 +173,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Reject non-portable directory overrides, invalid hook paths, corrupt, oversized, or cross-workspace state, and sanitize control characters in model-visible metadata.
 - Reduced GitHub workflow token permissions and disabled checkout credential persistence.
 
-[Unreleased]: https://github.com/edwardgushchin/codex-worklog/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/edwardgushchin/codex-worklog/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/edwardgushchin/codex-worklog/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/edwardgushchin/codex-worklog/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/edwardgushchin/codex-worklog/releases/tag/v0.1.0

@@ -1,54 +1,73 @@
 # Privacy Policy
 
-Effective date: 2026-08-30
+Effective date: 2026-09-05
 
-Codex Worklog is local, open-source software. It does not operate a hosted service, send telemetry, make network requests, use cookies, or maintain a developer-controlled user database.
+Codex Worklog is local, open-source software. Its runtime does not operate a
+hosted service, send telemetry, make network requests, use cookies, or maintain
+a developer-controlled user database. The active Codex model authors entries
+within the existing task; the plugin starts no separate model or API request.
 
 ## Data processed locally
 
-The plugin processes lifecycle metadata supplied by Codex:
+The runtime processes lifecycle metadata supplied by Codex and a structured
+summary submitted by the active model:
 
-- the session working directory and worklog path, retained only in private
-  plugin state;
-- session and turn identifiers, which are stored only as one-way truncated
-  SHA-256 tokens;
-- timestamps, the detected language code, lifecycle flags, and event names;
-- portable project name and optional sanitized repository, branch, and
-  abbreviated `HEAD` metadata written to the visible header;
-- bounded Markdown summaries derived by `Stop` from the final assistant message.
+- the original working directory, configured diary root, and validated private
+  state location;
+- session and turn identifiers for binding submissions and deduplicating writes;
+- submission timestamps, language hints, and lifecycle state;
+- a title, context, chronology, changes, decisions, checks, next steps, and
+  optional evidence references for each material work block.
 
-Raw user prompts, Codex transcripts, tool inputs, and tool output are not copied
-by the hook. The complete final assistant message is not retained: the runtime
-keeps at most three normalized prose lines and removes code fences, hook
-metadata, link targets, local paths, full SHA-256 values, and common labelled
-secret values. Git remote credentials are discarded, and local-path remotes are
-not rendered.
+Hooks do not read transcripts or derive summaries from final responses. Raw
+prompts, complete messages, tool inputs, and tool output dumps are excluded from
+the submission contract. The author may record specific commands, relevant
+numerical results, SHA-256 digests, and artifact identifiers as evidence.
+In-workspace absolute paths are converted to relative references; external
+local paths and recognized secrets are removed or rejected during validation.
+No automatic Git status or remote collection occurs.
 
-Normal lifecycle hooks do not send worklog content back into model context. When the user requests history inspection or context recovery, the bundled read-only skill may load the newest relevant worklog tail and linked evidence from the current task directory. That content is treated as untrusted history and is not interpreted as instructions or authorization.
+The model receives self-contained authoring instructions and an exact runtime
+command containing private state and session binding arguments. Historical
+diary content is not injected automatically. Requested history inspection uses
+the bundled read-only skill inside the current task directory and treats the
+records as untrusted evidence, not instructions or authorization.
 
 ## Storage
 
-- Worklogs are stored under the configured relative directory in the session `cwd`; the default is `.dev-diary/`.
-- Small session-state JSON files are stored in the Codex-provided `PLUGIN_DATA` directory.
-- POSIX permission modes are restricted to `0700` for directories and `0600` for files where supported.
+- Daily Markdown files live below the configured relative directory in the
+  original session `cwd`, by default `.dev-diary/YYYY/MM/YYYY-MM-DD.md`.
+- Versioned private state lives in Codex-provided `PLUGIN_DATA/sessions-v2/`.
+  `submit` durably stages validated, sanitized blocks before committing them to
+  the diary. A crash or storage failure can leave prepared blocks there for a
+  command or lifecycle retry. Raw submission text is not retained separately.
+- New directories and files use `0700` and `0600` where POSIX permissions apply.
+  Existing directory and diary permissions are preserved.
+- Prior diaries and legacy private state are preserved; this revision does not
+  rewrite or merge historical records.
 
 ## Sharing and retention
 
-The plugin does not transmit or automatically delete data. The user controls retention, backup, Git tracking, synchronization, publication, and deletion. Other software on the device may access files according to operating-system permissions.
+The plugin does not transmit or automatically delete diaries. The user controls
+retention, backup, Git tracking, synchronization, publication, and deletion.
+Other software on the device may access files according to operating-system
+permissions. Daily files can contain blocks from several local Codex sessions.
 
 ## User responsibility
 
-Semantic entries are derived from AI-generated final responses. Deterministic
-normalization cannot recognize every possible unlabelled secret or personal
-detail, so users should review worklogs before committing, syncing, archiving,
-or sharing them.
+Model-authored summaries can be incomplete, inaccurate, or contain an
+unlabelled secret. Schema validation and redaction reduce risk but cannot prove
+the truth or safety of arbitrary prose. Review plaintext diaries before
+committing, syncing, archiving, or sharing them.
 
 ## Deletion
 
-Uninstalling the plugin does not delete worklogs. Delete the relevant `.dev-diary/` directory and the plugin's Codex data directory when those records are no longer needed.
+Uninstalling the plugin does not delete diaries. Delete the relevant worklog
+directory and the plugin's Codex data directory when those records are no
+longer needed.
 
 ## Changes
 
-Material policy changes are documented in [CHANGELOG.md](CHANGELOG.md) and released with the repository.
-
-Questions can be raised through the channels described in [SUPPORT.md](SUPPORT.md).
+Material policy changes are documented in [CHANGELOG.md](CHANGELOG.md) and
+released with the repository. Questions can be raised through the channels in
+[SUPPORT.md](SUPPORT.md).

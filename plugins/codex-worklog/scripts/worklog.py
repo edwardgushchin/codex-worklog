@@ -1,1708 +1,1090 @@
 #!/usr/bin/env python3
-"""Lifecycle hook for the Codex Worklog plugin.
+"""Model-authored work blocks; deterministic validation and local daily storage.
 
-The hooks own worklog creation and appends. User prompts, tool inputs, tool
-output, and transcripts are deliberately not copied into the worklog.
+The model submits semantic JSON before its final answer. Submission commits it;
+Stop retries pending work. No facts are inferred from transcripts or tool output.
 """
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import locale
 import os
 import re
-import shutil
+import secrets
+import shlex
 import stat
-import subprocess  # nosec B404 - only bounded, non-shell local Git reads are used.
+import subprocess  # nosec B404 - list2cmdline only, no process execution.
 import sys
-import tempfile
+import time
 import unicodedata
 from collections.abc import Mapping
+from contextlib import contextmanager
 from datetime import datetime
-from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any
-from urllib.parse import urlsplit
+from pathlib import Path, PureWindowsPath
+from typing import Any, Iterator
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 DEFAULT_DIRECTORY = ".dev-diary"
-DEFAULT_ENFORCEMENT = "strict"
-ALLOWED_ENFORCEMENT = {"strict", "advisory", "off"}
-TAIL_BYTES = 128 * 1024
-MAX_INLINE_CHARS = 2048
-MAX_STATE_BYTES = 1024 * 1024
-MAX_APPEND_INPUT_BYTES = 32 * 1024
-MAX_ENTRY_TITLE_CHARS = 160
-MAX_ASSISTANT_SOURCE_CHARS = 16 * 1024
-MAX_AUTOMATIC_SUMMARY_CHARS = 1200
-MAX_SYSTEM_LOCALE_FILE_BYTES = 4096
-REQUIRED_ENTRY_FIELD_NAMES = ("title", "summary")
-OPTIONAL_ENTRY_FIELD_NAMES = (
-    "reason",
-    "unblocks",
-    "supersedes_status",
-    "verification",
-    "artifacts",
-    "next",
+MAX_APPEND_INPUT_BYTES = 64 * 1024
+MAX_STATE_BYTES = 2 * 1024 * 1024
+MAX_DAY_BYTES = 32 * 1024 * 1024
+MAX_ITEM_CHARS = 4096
+MAX_ITEMS = 32
+MAX_ENTRIES = 8
+LOCK_TIMEOUT = 1.0
+TEXT_FIELDS = ("context", "changes", "decisions", "checks", "next_steps")
+ENTRY_KEYS = {"title", *TEXT_FIELDS, "timeline", "artifacts", "supersedes"}
+REQUIRED_KEYS = {"title", *TEXT_FIELDS, "timeline"}
+SKIP_REASONS = {"acknowledgement", "no_material_work", "already_recorded"}
+LABELS = {
+    "en": ("Context", "Timeline", "Changes", "Decisions", "Checks", "Next steps"),
+    "ru": ("Контекст", "Хронология", "Изменения", "Решения", "Проверки", "Следующие шаги"),
+}
+ACKNOWLEDGEMENTS = {
+    "ок", "окей", "спасибо", "спасибо большое", "большое спасибо", "благодарю",
+    "понял", "поняла", "поняли", "принято", "ясно", "всё ясно", "все ясно",
+    "хорошо", "отлично", "супер", "спс", "ok", "okay", "thanks", "thank you",
+    "thx", "understood", "got it", "sounds good",
+}
+LINK = re.compile(r"(?<!!)\[([^\]\n]*)\]\((<[^>\n]+>|[^)\n]+)\)")
+URL = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s`<>\"()]+", re.I)
+ABSOLUTE = re.compile(r"(?<![\w:/])(?:[A-Za-z]:[\\/]|\\\\|/(?!/)|~/)[^\s`<>\"()]+")
+PRIVATE_KEY = re.compile(
+    r"-----BEGIN [^-\n]*PRIVATE KEY-----.*?(?:-----END [^-\n]*PRIVATE KEY-----|\Z)",
+    re.S,
 )
-REQUIRED_APPEND_PAYLOAD_KEYS = frozenset(
-    ("worklog_path", "marker", *REQUIRED_ENTRY_FIELD_NAMES)
-)
-ALLOWED_APPEND_PAYLOAD_KEYS = frozenset(
-    (*REQUIRED_APPEND_PAYLOAD_KEYS, *OPTIONAL_ENTRY_FIELD_NAMES)
-)
-TURN_MARKER_PATTERN = re.compile(r"<!-- codex-worklog-turn:[0-9a-f]{16} -->")
-FULL_SHA256_PATTERN = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{64}(?![0-9A-Fa-f])")
-POSIX_ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![:/\w])/(?!/)[^\r\n`]*")
-WINDOWS_ABSOLUTE_PATH_PATTERN = re.compile(
-    r"(?<![A-Za-z0-9_])(?:[A-Za-z]:[\\/]|\\\\)[^\r\n`]*"
-)
-MARKDOWN_LINK_PATTERN = re.compile(r"(?<!!)\[([^\]\r\n]+)\]\(([^)\r\n]+)\)")
-MARKDOWN_IMAGE_PATTERN = re.compile(r"!\[([^\]\r\n]*)\]\(([^)\r\n]+)\)")
-HTML_COMMENT_PATTERN = re.compile(r"<!--.*?-->", re.DOTALL)
-HTML_TAG_PATTERN = re.compile(r"</?[A-Za-z][^>]*>")
-URI_PATTERN = re.compile(r"\b(?:https?|file|codex)://\S+", re.IGNORECASE)
-HOME_PATH_PATTERN = re.compile(r"(?<!\w)~[/\\][^\r\n`]*")
-BEARER_PATTERN = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/-]{8,}")
-SENSITIVE_ASSIGNMENT_PATTERN = re.compile(
+ASSIGNMENT = re.compile(
     r"(?i)\b(api[_ -]?key|access[_ -]?token|auth[_ -]?token|refresh[_ -]?token|"
-    r"token|password|passwd|private[_ -]?key|client[_ -]?secret|secret|credentials?)"
-    r"\s*[:=]\s*(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;]+)"
+    r"token|password|passwd|private[_ -]?key|client[_ -]?secret|secret|credentials?|"
+    r"токен|пароль|секрет)\b\s*[:=]\s*"
+    r"(?:\"[^\"]*\"|'[^']*'|`[^`]*`|[^\s,;]+)"
 )
-ENTRY_REFERENCE_TIME_PATTERN = re.compile(r"(?<!\d)\d{2}:\d{2}(?!\d)")
-LANGUAGE_CODE_PATTERN = re.compile(r"^[A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,8})*$")
-ENTRY_HEADING_PATTERN = re.compile(
-    r"^### \d{4}-\d{2}-\d{2}T(?P<time>\d{2}:\d{2})(?:[^ ]*) — (?P<title>.+)$",
-    re.MULTILINE,
+KNOWN_SECRET = re.compile(
+    r"\b(?:sk-(?:proj-)?[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{16,}|"
+    r"github_pat_[A-Za-z0-9_]{16,}|AKIA[A-Z0-9]{16}|"
+    r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)\b"
 )
-GIT_TIMEOUT_SECONDS = 1.0
-SYSTEM_LOCALE_PATHS = (Path("/etc/locale.conf"), Path("/etc/default/locale"))
-LOCALIZED_TEXT = {
-    "en": {
-        "started": "Started",
-        "project": "Project",
-        "repository": "Repository",
-        "branch": "Branch",
-        "timeline": "Timeline",
-        "summary": "Outcome",
-        "reason": "Reason/decision",
-        "unblocks": "Unblocks",
-        "supersedes_status": "Supersedes status",
-        "verification": "Verified",
-        "artifacts": "Artifacts",
-        "next": "Next",
-        "automatic_title": "Turn completed",
-        "automatic_summary": (
-            "Codex completed the turn without a safe reusable prose summary."
-        ),
-    },
-    "ru": {
-        "started": "Начат",
-        "project": "Проект",
-        "repository": "Репозиторий",
-        "branch": "Ветка",
-        "timeline": "Хронология",
-        "summary": "Результат",
-        "reason": "Причина/решение",
-        "unblocks": "Разблокирует",
-        "supersedes_status": "Заменяет статус",
-        "verification": "Проверено",
-        "artifacts": "Артефакты",
-        "next": "Далее",
-        "automatic_title": "Ход работы завершён",
-        "automatic_summary": (
-            "Codex завершил работу без безопасного переиспользуемого резюме."
-        ),
-    },
-}
-ACKNOWLEDGEMENT_MAX_CHARS = 80
-ACKNOWLEDGEMENT_PHRASES = frozenset(
-    {
-        "большое спасибо",
-        "благодарю",
-        "всё ясно",
-        "все ясно",
-        "ок",
-        "окей",
-        "отлично",
-        "понял",
-        "поняла",
-        "поняли",
-        "принято",
-        "спасибо",
-        "спасибо большое",
-        "спс",
-        "супер",
-        "хорошо",
-        "ясно",
-        "got it",
-        "ok",
-        "okay",
-        "sounds good",
-        "thank you",
-        "thanks",
-        "thx",
-        "understood",
-    }
+AUTHORIZATION = re.compile(r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+")
+SECRET_ARGUMENT = re.compile(
+    r"(?i)(--(?:password|passwd|token|api-key|access-token|client-secret|secret)\b)"
+    r"(?:\s+|=)(?:\"[^\"]*\"|'[^']*'|[^\s`]+)"
 )
-ACKNOWLEDGEMENT_EMOJI = frozenset({"👍", "👌", "✅", "🙏"})
-QUESTION_MARKS = frozenset({"?", "¿", "⁇", "⁈", "⁉", "？"})
-PROMPT_INTENTS = frozenset(
-    {"acknowledgement", "change", "context_recovery", "read_only", "unknown"}
-)
-PROMPT_CHANGE_PATTERN = re.compile(
-    r"(?i)(?:"
-    r"\b(?:добав|включ|восстанов|выполн|исправ|измен|настро|обнов|отключ|"
-    r"опубли|перемест|переимен|почин|примен|реализ|сдела|созда|удал|установ|"
-    r"замен)\w*\b|"
-    r"\b(?:add|apply|build|change|configure|create|delete|deploy|disable|enable|"
-    r"fix|implement|install|move|publish|remove|rename|restore|run|set up|"
-    r"update)\b"
-    r")"
-)
-PROMPT_READ_ONLY_PATTERN = re.compile(
-    r"(?i)(?:"
-    r"\$(?:worklog)\b|"
-    r"\b(?:аудит|где|диагност|зачем|когда|какой|объясн|покаж|посмотр|почему|"
-    r"провер|прочита|проанализ|статус|что)\w*\b|"
-    r"\b(?:analy[sz]e|audit|check|diagnose|explain|find out|inspect|look at|"
-    r"read|review|show|status|verify|what|when|where|why)\b"
-    r")"
-)
-NO_STATE_CHANGE_PATTERN = re.compile(
-    r"(?i)(?:"
-    r"\bничего\s+не\s+(?:делал\w*|измен(?:ил\w*|ено|ял\w*)|"
-    r"менял\w*|записывал\w*)\b|"
-    r"\bизменени\w*\s+(?:не\s+было|не\s+вносил\w*|нет)\b|"
-    r"\bбез\s+изменений\b|"
-    r"\bno\s+changes?(?:\s+(?:were|was))?\s+made\b|"
-    r"\bnothing\s+(?:was\s+)?changed\b|"
-    r"\bmade\s+no\s+changes?\b"
-    r")"
-)
-STATE_CHANGE_PATTERN = re.compile(
-    r"(?i)(?:"
-    r"\b(?:добав(?:ил|лен)\w*|включ(?:ил|[её]н)\w*|восстанов(?:ил|лен)\w*|"
-    r"выполн(?:ил|ен)\w*|исправ(?:ил|лен)\w*|измен(?:ил|[её]н)\w*|"
-    r"настро(?:ил|ен)\w*|обнов(?:ил|л[её]н)\w*|отключ(?:ил|[её]н)\w*|"
-    r"опубликов(?:ал|ан)\w*|перемест(?:ил|ён|ен)\w*|переимен(?:овал|ован)\w*|"
-    r"почин(?:ил|ен)\w*|примен(?:ил|[её]н)\w*|реализ(?:овал|ован)\w*|"
-    r"созд(?:ал|ан)\w*|удал(?:ил|[её]н)\w*|установ(?:ил|лен)\w*|"
-    r"замен(?:ил|[её]н)\w*|зафиксир(?:овал|ован)\w*|"
-    r"заверш(?:ил|[её]н)\w*|устран(?:ил|[её]н)\w*)\b|"
-    r"\b(?:added|applied|built|changed|completed|configured|created|deleted|"
-    r"deployed|disabled|enabled|fixed|implemented|installed|moved|published|"
-    r"recovered|removed|renamed|resolved|restored|updated)\b"
-    r")"
-)
-FIRST_PERSON_STATE_CHANGE_PATTERN = re.compile(
-    r"(?i)(?:"
-    r"\b(?:я\s+)?(?:добавил|включил|восстановил|выполнил|исправил|изменил|"
-    r"настроил|обновил|отключил|опубликовал|переместил|переименовал|починил|"
-    r"применил|реализовал|создал|удалил|установил|заменил|зафиксировал)\b|"
-    r"\bI\s+(?:added|applied|built|changed|configured|created|deleted|deployed|"
-    r"disabled|enabled|fixed|implemented|installed|moved|published|removed|"
-    r"renamed|restored|updated)\b"
-    r")"
-)
-BLOCKER_OR_DISCOVERY_PATTERN = re.compile(
-    r"(?i)(?:"
-    r"\b(?:обнаружен|выявлен|найден)\w*\s+(?:блокер|дефект|ошибк|причин)\w*|"
-    r"\b(?:заблокирован|блокирует|не\s+удалось)\b|"
-    r"\b(?:blocked|blocker|could\s+not|failed|root\s+cause|unable\s+to)\b"
-    r")"
-)
-REASON_PATTERN = re.compile(
-    r"(?i)(?:"
-    r"\b(?:корневая\s+)?причин\w*\b|"
-    r"\b(?:дефект|ошибк|проблем)\w*\s+(?:был\w*\s+)?(?:вызван|возник)\w*\b|"
-    r"\bиз-за\b|"
-    r"\b(?:принят|выбран)\w*\s+(?:решени|вариант|подход)\w*\b|"
-    r"\b(?:decided|decision|root\s+cause)\b|"
-    r"\b(?:chose|selected)\b.*\bbecause\b"
-    r")"
-)
-VERIFICATION_PATTERN = re.compile(
-    r"(?i)(?:"
-    r"\b(?:провер(?:ен|ена|ено|ены|ил)\w*|подтвержд(?:ён|ен)(?!и)\w*|"
-    r"тест\w*\s+(?:прош|успеш))\b|"
-    r"\b(?:confirmed|tests?\s+pass(?:ed)?|verif(?:ied|ication))\b"
-    r")"
-)
-STATUS_ARROW_PATTERN = re.compile(
-    r"(?<![\w.-])(?P<previous>[A-Za-z0-9][A-Za-z0-9_.-]{0,63})\s*"
-    r"(?:→|->)\s*(?P<current>[A-Za-z0-9][A-Za-z0-9_.-]{0,63})(?![\w.-])"
-)
-FIELD_LABELS = {
-    "summary": frozenset({"outcome", "result", "результат"}),
-    "reason": frozenset(
-        {
-            "decision",
-            "reason",
-            "reason/decision",
-            "причина",
-            "причина/решение",
-            "решение",
-        }
-    ),
-    "unblocks": frozenset({"unblocks", "разблокирует"}),
-    "supersedes_status": frozenset({"supersedes status", "заменяет статус"}),
-    "verification": frozenset({"verification", "verified", "проверено"}),
-    "artifacts": frozenset({"artifacts", "артефакты"}),
-    "next": frozenset({"next", "далее"}),
-}
+SECRET_PARAMETER = re.compile(r"auth|credential|key|password|secret|signature|token", re.I)
 
 
 class WorklogError(RuntimeError):
-    """Expected configuration or filesystem error."""
+    """A safe, user-visible contract failure (never includes submitted content)."""
 
 
 def _now() -> datetime:
     return datetime.now().astimezone()
 
 
-def _token(value: str, length: int = 16) -> str:
-    return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()[:length]
+def _token(value: str, length: int = 24) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:length]
 
 
-def _unsafe_inline_character(character: str) -> bool:
-    return unicodedata.category(character) in {"Cc", "Cf", "Cs", "Zl", "Zp"}
+def _timestamp(now: datetime | None = None) -> datetime:
+    value = now or _now()
+    return value if value.tzinfo is not None else value.astimezone()
 
 
-def _safe_inline(value: object) -> str:
-    text = str(value)
-    sanitized = "".join(
-        " " if _unsafe_inline_character(character) else character for character in text
-    ).replace("`", "'")
-    if len(sanitized) > MAX_INLINE_CHARS:
-        return f"{sanitized[: MAX_INLINE_CHARS - 1]}…"
-    return sanitized
-
-
-def _locale_language(value: object) -> str | None:
-    if not isinstance(value, str) or not value.strip():
-        return None
-    candidate = value.split(":", 1)[0].strip().split(".", 1)[0].split("@", 1)[0]
-    if candidate.casefold() in {"c", "posix"}:
-        return None
-    if LANGUAGE_CODE_PATTERN.fullmatch(candidate) is None:
-        return None
-    return re.split(r"[-_]", candidate, maxsplit=1)[0].lower()
-
-
-def _language_from_system_locale_files(
-    paths: tuple[Path, ...] = SYSTEM_LOCALE_PATHS,
-) -> str | None:
-    for path in paths:
-        try:
-            raw = path.read_bytes()
-        except OSError:
-            continue
-        if len(raw) > MAX_SYSTEM_LOCALE_FILE_BYTES:
-            continue
-        try:
-            contents = raw.decode("utf-8", errors="strict")
-        except UnicodeError:
-            continue
-        values: dict[str, str] = {}
-        for raw_line in contents.splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            key = key.strip()
-            if key not in {"LANG", "LANGUAGE", "LC_MESSAGES"}:
-                continue
-            value = value.strip()
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-                value = value[1:-1]
-            values[key] = value
-        for key in ("LANGUAGE", "LC_MESSAGES", "LANG"):
-            language = _locale_language(values.get(key))
-            if language is not None:
-                return language
-    return None
-
-
-def _system_language(
-    environment: Mapping[str, str],
-    system_locale_paths: tuple[Path, ...] = SYSTEM_LOCALE_PATHS,
-) -> str:
-    override = environment.get("CODEX_WORKLOG_LANGUAGE")
-    if override is not None:
-        language = _locale_language(override)
-        if language is None:
-            raise WorklogError(
-                "CODEX_WORKLOG_LANGUAGE must contain a valid language or locale code"
-            )
-        return language
-    for key in ("LC_ALL", "LANGUAGE", "LC_MESSAGES", "LANG"):
-        language = _locale_language(environment.get(key))
-        if language is not None:
-            return language
-    language = _language_from_system_locale_files(system_locale_paths)
-    if language is not None:
-        return language
-    try:
-        language = _locale_language(locale.getlocale()[0])
-    except (TypeError, ValueError, locale.Error):
-        language = None
-    return language or "en"
-
-
-def _localized(language: str, key: str) -> str:
-    labels = LOCALIZED_TEXT.get(language, LOCALIZED_TEXT["en"])
-    return labels[key]
-
-
-def _contains_absolute_local_path(value: str) -> bool:
-    lowered = value.casefold()
-    return (
-        bool(POSIX_ABSOLUTE_PATH_PATTERN.search(value))
-        or bool(WINDOWS_ABSOLUTE_PATH_PATTERN.search(value))
-        or "file://" in lowered
-        or bool(re.search(r"(?<!\w)~[/\\]", value))
-    )
-
-
-def _portable_metadata(value: object) -> str | None:
-    text = _safe_inline(value).strip()
-    if not text or _contains_absolute_local_path(text):
-        return None
-    return text
-
-
-def _git_output(workspace: Path, *arguments: str) -> str | None:
-    git_executable = shutil.which("git")
-    if git_executable is None or not Path(git_executable).is_absolute():
-        return None
-    child_environment = os.environ.copy()
-    child_environment.update(
-        {
-            "GIT_OPTIONAL_LOCKS": "0",
-            "GIT_TERMINAL_PROMPT": "0",
-            "LC_ALL": "C",
-        }
-    )
-    try:
-        completed = subprocess.run(  # nosec B603
-            [git_executable, "-C", str(workspace), *arguments],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-            timeout=GIT_TIMEOUT_SECONDS,
-            env=child_environment,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if completed.returncode != 0:
-        return None
-    output = completed.stdout.strip()
-    return output if output and "\n" not in output and "\r" not in output else None
-
-
-def _repository_identifier(remote: str | None, fallback: str) -> str:
-    if remote is None:
-        return fallback
-    value = remote.strip()
-    scp_match = re.fullmatch(r"[^/@\s]+@[^:/\s]+:(.+)", value)
-    if scp_match is not None:
-        candidate = scp_match.group(1)
-    else:
-        try:
-            parsed = urlsplit(value)
-        except ValueError:
-            return fallback
-        if parsed.scheme:
-            if parsed.scheme.casefold() not in {"git", "http", "https", "ssh"}:
-                return fallback
-            candidate = parsed.path
-        else:
-            if (
-                PurePosixPath(value).is_absolute()
-                or PureWindowsPath(value).is_absolute()
-            ):
-                return fallback
-            candidate = value
-    candidate = candidate.strip().strip("/")
-    candidate = candidate.removesuffix(".git")
-    parts = candidate.split("/")
-    if not candidate or any(part in {"", ".", ".."} for part in parts):
-        return fallback
-    return _portable_metadata(candidate) or fallback
-
-
-def _project_metadata(workspace: Path) -> dict[str, str]:
-    project = _portable_metadata(workspace.name) or "workspace"
-    metadata = {"project": project}
-    root_value = _git_output(workspace, "rev-parse", "--show-toplevel")
-    if root_value is None:
-        return metadata
-    try:
-        repository_root = Path(root_value).resolve(strict=True)
-    except (OSError, RuntimeError, ValueError):
-        return metadata
-    fallback = _portable_metadata(repository_root.name) or project
-    remote = _git_output(workspace, "config", "--get", "remote.origin.url")
-    metadata["repository"] = _repository_identifier(remote, fallback)
-    branch = _portable_metadata(
-        _git_output(workspace, "symbolic-ref", "--quiet", "--short", "HEAD")
-        or "detached"
-    )
-    if branch is not None:
-        metadata["branch"] = branch
-    head = _git_output(workspace, "rev-parse", "HEAD")
-    if head is not None and re.fullmatch(r"[0-9A-Fa-f]{40,64}", head):
-        metadata["head"] = head[:12].lower()
-    return metadata
-
-
-def _is_acknowledgement_prompt(value: object) -> bool:
-    if not isinstance(value, str) or not value.strip():
-        return False
-    if len(value) > ACKNOWLEDGEMENT_MAX_CHARS:
-        return False
-    normalized = unicodedata.normalize("NFKC", value).casefold().strip()
-    if any(character in QUESTION_MARKS for character in normalized):
-        return False
-    if normalized in ACKNOWLEDGEMENT_EMOJI:
-        return True
-    phrase = "".join(
-        " "
-        if character.isspace() or unicodedata.category(character).startswith(("P", "S"))
-        else character
-        for character in normalized
-    )
-    return " ".join(phrase.split()) in ACKNOWLEDGEMENT_PHRASES
-
-
-def _prompt_intent(value: object) -> str:
-    if _is_acknowledgement_prompt(value):
-        return "acknowledgement"
-    if not isinstance(value, str) or not value.strip():
-        return "unknown"
-    source = unicodedata.normalize("NFKC", value[:MAX_ASSISTANT_SOURCE_CHARS])
-    if (
-        re.search(
-            r"(?i)(?:\$worklog\b|\bвосстанов\w*\s+контекст\b|\brecover\s+context\b)",
-            source,
-        )
-        is not None
-    ):
-        return "context_recovery"
-    if PROMPT_CHANGE_PATTERN.search(source) is not None:
-        return "change"
-    if PROMPT_READ_ONLY_PATTERN.search(source) is not None:
-        return "read_only"
-    return "unknown"
-
-
-def _entry_value(payload: Mapping[str, Any], key: str) -> str:
-    value = payload.get(key)
-    if not isinstance(value, str) or not value.strip():
-        raise WorklogError(f"append payload field {key} must be a non-empty string")
-    value = unicodedata.normalize("NFC", value.strip())
-    limit = MAX_ENTRY_TITLE_CHARS if key == "title" else MAX_INLINE_CHARS
-    if len(value) > limit:
-        raise WorklogError(f"append payload field {key} is too long")
-    if any(
-        character in "\r\n" or _unsafe_inline_character(character)
-        for character in value
-    ):
-        raise WorklogError(f"append payload field {key} must be a single safe line")
-    if "<!-- codex-worklog-" in value:
-        raise WorklogError(f"append payload field {key} contains a reserved marker")
-    if _contains_absolute_local_path(value):
-        raise WorklogError(
-            f"append payload field {key} contains an absolute local path; "
-            "use a project-relative reference"
-        )
-    if FULL_SHA256_PATTERN.search(value) is not None:
-        raise WorklogError(
-            f"append payload field {key} contains a full SHA-256 digest; "
-            "link a report from artifacts instead"
-        )
+def _identity(value: object, field: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value) is None:
+        raise WorklogError(f"{field} must be a non-empty host identifier")
     return value
 
 
-def _assistant_source(message: object) -> str:
-    if not isinstance(message, str) or not message.strip():
-        raise WorklogError("the Stop hook did not include a final assistant message")
-    source = unicodedata.normalize("NFC", message[:MAX_ASSISTANT_SOURCE_CHARS])
-    return re.split(r"\n<oai-mem-citation(?:\s|>)", source, maxsplit=1)[0]
-
-
-def _assistant_lines(source: str) -> list[str]:
-    source = HTML_COMMENT_PATTERN.sub(" ", source)
-    lines: list[str] = []
-    in_fence = False
-    for raw_line in source.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-        stripped = raw_line.strip()
-        if stripped.startswith(("```", "~~~")):
-            in_fence = not in_fence
-            continue
-        if in_fence or not stripped:
-            continue
-        if stripped.startswith((":codex-", "::code-comment", "::created-thread")):
-            continue
-        if stripped.startswith("#"):
-            continue
-        lines.append(stripped)
-    return lines
-
-
-def _clean_assistant_line(value: str) -> str:
-    stripped = value.strip()
-    stripped = re.sub(r"^(?:[-*+] |\d+[.)] |>\s*)", "", stripped).strip()
-    stripped = MARKDOWN_IMAGE_PATTERN.sub(lambda match: match.group(1), stripped)
-    stripped = MARKDOWN_LINK_PATTERN.sub(lambda match: match.group(1), stripped)
-    stripped = HTML_TAG_PATTERN.sub(" ", stripped)
-    stripped = URI_PATTERN.sub("[link]", stripped)
-    stripped = HOME_PATH_PATTERN.sub("[local path]", stripped)
-    stripped = WINDOWS_ABSOLUTE_PATH_PATTERN.sub("[local path]", stripped)
-    stripped = POSIX_ABSOLUTE_PATH_PATTERN.sub("[local path]", stripped)
-    stripped = BEARER_PATTERN.sub("Bearer [redacted]", stripped)
-    stripped = SENSITIVE_ASSIGNMENT_PATTERN.sub(
-        lambda match: f"{match.group(1)}=[redacted]", stripped
-    )
-    stripped = FULL_SHA256_PATTERN.sub("[digest]", stripped)
-    stripped = stripped.replace("`", "").replace("**", "").replace("__", "")
-    return " ".join(stripped.split())
-
-
-def _field_label_and_value(line: str) -> tuple[str, str] | None:
-    candidate = re.sub(r"^(?:[-*+] |\d+[.)] |>\s*)", "", line).strip()
-    candidate = candidate.replace("**", "").replace("__", "")
-    match = re.match(r"^([^:—]{1,40})\s*(?::|—)\s*(.+)$", candidate)
-    if match is None:
+def _language(value: object) -> str | None:
+    if not isinstance(value, str):
         return None
-    normalized_label = " ".join(match.group(1).replace("`", "").casefold().split())
-    for field, labels in FIELD_LABELS.items():
-        if normalized_label in labels:
-            return field, match.group(2).strip()
+    candidate = value.strip().split(":", 1)[0].split(".", 1)[0].split("@", 1)[0]
+    if candidate.casefold() in {"c", "posix"}:
+        return None
+    if re.fullmatch(r"[A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,8})*", candidate):
+        return re.split(r"[-_]", candidate)[0].lower()
     return None
 
 
-def _automatic_entry_text(message: object, language: str) -> tuple[str, str]:
-    """Derive one bounded prose summary without retaining the full response."""
-
-    source = _assistant_source(message)
-    candidates: list[str] = []
-    for raw_line in _assistant_lines(source):
-        labelled = _field_label_and_value(raw_line)
-        if labelled is not None:
-            field, raw_value = labelled
-            if field != "summary":
-                continue
-            raw_line = raw_value
-        stripped = _clean_assistant_line(raw_line)
-        if not stripped:
-            continue
-        candidates.append(stripped)
-        if len(candidates) >= 3 or sum(len(value) for value in candidates) >= 800:
-            break
-
-    summary = " ".join(candidates).strip()
-    if not summary:
-        summary = _localized(language, "automatic_summary")
-    if len(summary) > MAX_AUTOMATIC_SUMMARY_CHARS:
-        summary = f"{summary[: MAX_AUTOMATIC_SUMMARY_CHARS - 1].rstrip()}…"
-
-    sentence = re.match(r"^(.{1,160}?[.!?…])(?:\s|$)", summary)
-    title = sentence.group(1) if sentence is not None else summary
-    title = title.rstrip(".!?…").rstrip()
-    if len(title) > MAX_ENTRY_TITLE_CHARS:
-        title = f"{title[: MAX_ENTRY_TITLE_CHARS - 1].rstrip()}…"
-    if not title:
-        title = _localized(language, "automatic_title")
-    return title, summary
-
-
-def _safe_automatic_field(value: str) -> str | None:
-    cleaned = _clean_assistant_line(value)
-    if not cleaned or cleaned.casefold() in {
-        "n/a",
-        "none",
-        "not applicable",
-        "нет",
-        "не применимо",
-    }:
-        return None
-    if len(cleaned) > MAX_INLINE_CHARS:
-        cleaned = f"{cleaned[: MAX_INLINE_CHARS - 1].rstrip()}…"
-    return cleaned
-
-
-def _normalized_status_transition(value: str) -> str | None:
-    cleaned = _clean_assistant_line(value)
-    match = STATUS_ARROW_PATTERN.search(cleaned)
-    if match is not None:
-        return f"{match.group('previous')} → {match.group('current')}"
-    replacement_patterns = (
-        re.compile(
-            r"(?i)\bстатус\s+([A-Za-z0-9][A-Za-z0-9_.-]{0,63})\s+"
-            r"замен[её]н\s+на\s+([A-Za-z0-9][A-Za-z0-9_.-]{0,63})\b"
-        ),
-        re.compile(
-            r"(?i)\bstatus\s+([A-Za-z0-9][A-Za-z0-9_.-]{0,63})\s+"
-            r"(?:was\s+)?(?:replaced|superseded)\s+(?:by|with)\s+"
-            r"([A-Za-z0-9][A-Za-z0-9_.-]{0,63})\b"
-        ),
-    )
-    for pattern in replacement_patterns:
-        replacement = pattern.search(cleaned)
-        if replacement is not None:
-            return f"{replacement.group(1)} → {replacement.group(2)}"
-    return None
-
-
-def _automatic_artifacts(value: str, workspace: Path) -> str | None:
-    rendered: list[str] = []
+def _system_language(environment: Mapping[str, str]) -> str:
+    override = environment.get("CODEX_WORKLOG_LANGUAGE")
+    if override is not None:
+        if not _language(override):
+            raise WorklogError("CODEX_WORKLOG_LANGUAGE must be a language code")
+        return _language(override) or "en"
+    for key in ("LC_ALL", "LANGUAGE", "LC_MESSAGES", "LANG"):
+        if _language(environment.get(key)):
+            return _language(environment[key]) or "en"
     try:
-        workspace_root = workspace.resolve(strict=True)
-    except (OSError, RuntimeError):
-        return None
-    for match in MARKDOWN_LINK_PATTERN.finditer(value):
-        label = _clean_assistant_line(match.group(1))
-        raw_target = match.group(2).strip()
-        target = (
-            raw_target[1:-1]
-            if raw_target.startswith("<") and raw_target.endswith(">")
-            else raw_target
-        )
-        try:
-            parsed = urlsplit(target)
-        except ValueError:
-            continue
-        if parsed.scheme:
-            if (
-                parsed.scheme.casefold() != "https"
-                or not parsed.netloc
-                or parsed.username is not None
-                or parsed.password is not None
-            ):
-                continue
-            normalized_target = target
-        else:
-            local_target, separator, fragment = target.partition("#")
-            candidate = Path(local_target)
-            try:
-                resolved = (
-                    candidate.resolve(strict=True)
-                    if candidate.is_absolute()
-                    else (workspace_root / candidate).resolve(strict=True)
-                )
-                relative = resolved.relative_to(workspace_root)
-            except (OSError, RuntimeError, ValueError):
-                continue
-            if not resolved.is_file():
-                continue
-            normalized_target = relative.as_posix()
-            if separator:
-                normalized_target += f"#{fragment}"
-        if not label:
-            label = "report"
-        if any(character.isspace() for character in normalized_target):
-            normalized_target = f"<{normalized_target}>"
-        rendered.append(f"[{label}]({normalized_target})")
-    return ", ".join(rendered) or None
+        return _language(locale.getlocale()[0]) or "en"
+    except (ValueError, locale.Error):
+        return "en"
 
 
-def _assistant_sentences(source: str) -> list[str]:
-    lines = [_clean_assistant_line(line) for line in _assistant_lines(source)]
-    text = " ".join(line for line in lines if line)
-    return [
-        sentence.strip()
-        for sentence in re.split(r"(?<=[.!?…])\s+", text)
-        if sentence.strip()
-    ]
-
-
-def _natural_field(sentences: list[str], pattern: re.Pattern[str]) -> str | None:
-    for sentence in sentences:
-        if pattern.search(sentence) is None:
-            continue
-        return _safe_automatic_field(sentence)
-    return None
-
-
-def _read_tail_text(path: Path) -> str:
-    descriptor = _open_regular_file(path, os.O_RDONLY)
-    try:
-        with os.fdopen(descriptor, "rb") as stream:
-            stream.seek(0, os.SEEK_END)
-            size = stream.tell()
-            stream.seek(max(0, size - TAIL_BYTES), os.SEEK_SET)
-            return stream.read().decode("utf-8", errors="replace")
-    except OSError as error:
-        raise WorklogError(f"unable to inspect the worklog tail: {error}") from error
-
-
-def _previous_unblocked_reference(path: Path, source: str) -> str | None:
-    if (
-        STATE_CHANGE_PATTERN.search(source) is None
-        and re.search(r"(?i)\b(?:разблокирован|снят\s+блокер|unblocked)\b", source)
-        is None
-    ):
-        return None
-    source_tokens = {
-        token.casefold()
-        for token in re.findall(r"[A-Za-zА-Яа-яЁё0-9][\w.-]{3,}", source)
-    }
-    stop_tokens = {
-        "awaiting",
-        "blocked",
-        "pending",
-        "блокер",
-        "ожидание",
-        "ожидании",
-    }
-    for match in reversed(list(ENTRY_HEADING_PATTERN.finditer(_read_tail_text(path)))):
-        title = match.group("title").strip()
-        if (
-            re.search(
-                r"(?i)\b(?:await|block|pending|блок|ожид|policykit|требует)\w*\b",
-                title,
-            )
-            is None
-        ):
-            continue
-        title_tokens = {
-            token.casefold()
-            for token in re.findall(r"[A-Za-zА-Яа-яЁё0-9][\w.-]{3,}", title)
-        }
-        if not ((title_tokens - stop_tokens) & (source_tokens - stop_tokens)):
-            continue
-        reference = f"{match.group('time')} — {title}"
-        try:
-            validated = _entry_value({"unblocks": reference}, "unblocks")
-            _validate_transition_fields({"unblocks": validated})
-        except WorklogError:
-            continue
-        return validated
-    return None
-
-
-def _automatic_entry(
-    message: object,
-    language: str,
-    prompt_intent: str,
-    workspace: Path,
-    worklog_path: Path,
-) -> dict[str, str] | None:
-    source = _assistant_source(message)
-    sentences = _assistant_sentences(source)
-    labelled: dict[str, str] = {}
-    raw_artifacts: str | None = None
-    for line in _assistant_lines(source):
-        parsed = _field_label_and_value(line)
-        if parsed is None:
-            continue
-        field, raw_value = parsed
-        if field == "artifacts":
-            raw_artifacts = raw_value
-            continue
-        if field not in labelled:
-            cleaned = _safe_automatic_field(raw_value)
-            if cleaned is not None:
-                labelled[field] = cleaned
-
-    reason = labelled.get("reason") or _natural_field(sentences, REASON_PATTERN)
-    verification = labelled.get("verification") or _natural_field(
-        sentences, VERIFICATION_PATTERN
-    )
-    transition = _normalized_status_transition(
-        labelled.get("supersedes_status", source)
-    )
-    unblocks = labelled.get("unblocks")
-    if unblocks is not None:
-        try:
-            _validate_transition_fields({"unblocks": unblocks})
-        except WorklogError:
-            unblocks = None
-    if unblocks is None:
-        unblocks = _previous_unblocked_reference(worklog_path, source)
-
-    has_decision_or_explanation = reason is not None
-    has_transition = transition is not None or unblocks is not None
-    no_state_change = NO_STATE_CHANGE_PATTERN.search(source) is not None
-    state_change = STATE_CHANGE_PATTERN.search(source) is not None
-    blocker_or_discovery = BLOCKER_OR_DISCOVERY_PATTERN.search(source) is not None
-    if not has_decision_or_explanation and not has_transition:
-        if no_state_change:
-            return None
-        if prompt_intent == "read_only":
-            if (
-                FIRST_PERSON_STATE_CHANGE_PATTERN.search(source) is None
-                and not blocker_or_discovery
-            ):
-                return None
-        elif (
-            not state_change
-            and not blocker_or_discovery
-            and (
-                prompt_intent != "change"
-                or re.search(r"(?i)^\s*(?:готово|done)[.!]?\s*$", source) is None
-            )
-        ):
-            return None
-
-    title, summary = _automatic_entry_text(message, language)
-    if "summary" in labelled:
-        summary = labelled["summary"]
-        title = re.split(r"[.!?…](?:\s|$)", summary, maxsplit=1)[0].strip()
-        if len(title) > MAX_ENTRY_TITLE_CHARS:
-            title = f"{title[: MAX_ENTRY_TITLE_CHARS - 1].rstrip()}…"
-    entry = {"title": title, "summary": summary}
-    optional = {
-        "reason": reason,
-        "unblocks": unblocks,
-        "supersedes_status": transition,
-        "verification": verification,
-        "artifacts": (
-            _automatic_artifacts(raw_artifacts, workspace)
-            if raw_artifacts is not None
-            else None
-        ),
-        "next": labelled.get("next"),
-    }
-    entry.update({key: value for key, value in optional.items() if value is not None})
-    return entry
-
-
-def _path_is_context_safe(path: Path) -> bool:
-    value = str(path)
-    return (
-        len(value) <= MAX_INLINE_CHARS
-        and "`" not in value
-        and not any(_unsafe_inline_character(character) for character in value)
-    )
-
-
-def _same_existing_directory(left: Path, right: Path) -> bool:
-    try:
-        return left.absolute().resolve(strict=True) == right.absolute().resolve(
-            strict=True
-        )
-    except (OSError, RuntimeError):
+def _is_acknowledgement_prompt(value: object) -> bool:
+    if not isinstance(value, str) or len(value.strip()) > 80:
         return False
+    value = unicodedata.normalize("NFKC", value.strip()).casefold()
+    if not value or any(c in value for c in "?¿⁇⁈⁉？"):
+        return False
+    if value in {"👍", "👌", "✅", "🙏"}:
+        return True
+    phrase = "".join(" " if unicodedata.category(c).startswith(("P", "S")) else c for c in value)
+    return " ".join(phrase.split()) in ACKNOWLEDGEMENTS
 
 
-def _private_mode(path: Path, mode: int) -> None:
+def _absolute(value: object, label: str) -> Path:
+    if not isinstance(value, (str, Path)) or not str(value).strip():
+        raise WorklogError(f"{label} is unavailable")
+    raw = str(value)
+    if len(raw) > 4096 or any(unicodedata.category(c) in {"Cc", "Cf", "Cs"} for c in raw):
+        raise WorklogError(f"{label} contains unsafe characters")
+    return Path(os.path.abspath(raw))
+
+
+def _workspace(value: object) -> Path:
+    path = _absolute(value, "session cwd")
     try:
-        path.chmod(mode)
-    except OSError:
-        # Windows and some network filesystems do not expose POSIX modes.
-        pass
-
-
-def _ensure_private_directory(path: Path) -> None:
-    if path.is_symlink():
-        raise WorklogError(f"refusing symbolic link for private plugin data: {path}")
-    try:
-        path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    except OSError as error:
-        raise WorklogError(
-            f"unable to create private directory {path}: {error}"
-        ) from error
-    if path.is_symlink() or not path.is_dir():
-        raise WorklogError(f"private path is not a safe directory: {path}")
-    _private_mode(path, 0o700)
-
-
-def _ensure_workspace_directory(workspace: Path, relative_path: Path) -> Path:
-    current = workspace
-    for part in relative_path.parts:
-        current = current / part
-        if current.is_symlink():
-            raise WorklogError(f"refusing symbolic link in the worklog path: {current}")
-        if current.exists() and not current.is_dir():
-            raise WorklogError(f"worklog path component is not a directory: {current}")
-        try:
-            current.mkdir(mode=0o700, exist_ok=True)
-        except OSError as error:
-            raise WorklogError(
-                f"unable to create worklog directory {current}: {error}"
-            ) from error
-        _private_mode(current, 0o700)
-    return current
-
-
-def _validate_worklog_path(workspace: Path, path: Path) -> Path:
-    workspace = workspace.absolute()
-    path = path.absolute()
-    if not _path_is_context_safe(path):
-        raise WorklogError("worklog path contains unsupported unsafe characters")
-    try:
-        path_status = path.lstat()
-    except OSError as error:
-        raise WorklogError(f"worklog file is unavailable: {path}") from error
-    if stat.S_ISLNK(path_status.st_mode):
-        raise WorklogError(f"refusing symbolic link for the worklog file: {path}")
-    if not stat.S_ISREG(path_status.st_mode):
-        raise WorklogError(f"worklog path is not a regular file: {path}")
-    if path_status.st_nlink != 1:
-        raise WorklogError(f"refusing hard-linked worklog file: {path}")
-    try:
-        resolved_workspace = workspace.resolve(strict=True)
-        resolved_path = path.resolve(strict=False)
-        relative_path = resolved_path.relative_to(resolved_workspace)
-    except (OSError, ValueError) as error:
-        raise WorklogError(
-            f"worklog path escapes the session working directory: {path}"
-        ) from error
-    try:
-        path_parts = path.relative_to(workspace).parts
-    except ValueError:
-        # macOS commonly exposes /var through the canonical /private/var path.
-        path_parts = relative_path.parts
-    current = resolved_workspace
-    for part in path_parts:
-        current = current / part
-        if current.is_symlink():
-            raise WorklogError(f"refusing symbolic link in the worklog path: {current}")
-    return path
-
-
-def _open_regular_file(path: Path, flags: int) -> int:
-    secure_flags = flags
-    if hasattr(os, "O_CLOEXEC"):
-        secure_flags |= os.O_CLOEXEC
-    if hasattr(os, "O_NOFOLLOW"):
-        secure_flags |= os.O_NOFOLLOW
-    if hasattr(os, "O_BINARY"):
-        secure_flags |= os.O_BINARY
-    try:
-        descriptor = os.open(path, secure_flags)
-    except OSError as error:
-        raise WorklogError(f"unable to open regular file {path}: {error}") from error
-    try:
-        opened_status = os.fstat(descriptor)
-        current_status = os.stat(path, follow_symlinks=False)
-        if (
-            not stat.S_ISREG(opened_status.st_mode)
-            or opened_status.st_nlink != 1
-            or stat.S_ISLNK(current_status.st_mode)
-            or (opened_status.st_dev, opened_status.st_ino)
-            != (current_status.st_dev, current_status.st_ino)
-        ):
-            raise WorklogError(f"file changed or is linked while opening: {path}")
-        return descriptor
-    except Exception:
-        os.close(descriptor)
-        raise
-
-
-def _read_prefix(path: Path, limit: int) -> str:
-    descriptor = _open_regular_file(path, os.O_RDONLY)
-    try:
-        with os.fdopen(descriptor, "r", encoding="utf-8", errors="strict") as stream:
-            return stream.read(limit)
-    except (OSError, UnicodeError) as error:
-        raise WorklogError(f"unable to inspect regular file {path}: {error}") from error
-
-
-def _append_text(path: Path, text: str) -> None:
-    descriptor = _open_regular_file(path, os.O_WRONLY | os.O_APPEND)
-    try:
-        with os.fdopen(descriptor, "a", encoding="utf-8", newline="\n") as stream:
-            stream.write(text)
-            stream.flush()
-            os.fsync(stream.fileno())
-    except OSError as error:
-        raise WorklogError(f"unable to append the worklog: {error}") from error
-    _private_mode(path, 0o600)
-
-
-def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
-    _ensure_private_directory(path.parent)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-    )
-    temporary_path = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
-            json.dump(payload, stream, ensure_ascii=False, indent=2, sort_keys=True)
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        _private_mode(temporary_path, 0o600)
-        temporary_path.replace(path)
-        _private_mode(path, 0o600)
-    finally:
-        try:
-            temporary_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-
-
-def _load_json(path: Path) -> dict[str, Any] | None:
-    if not path.exists() and not path.is_symlink():
-        return None
-    try:
-        raw_payload = _read_prefix(path, MAX_STATE_BYTES + 1)
-        if len(raw_payload.encode("utf-8")) > MAX_STATE_BYTES:
-            raise WorklogError(f"plugin state file is too large: {path}")
-        payload = json.loads(raw_payload)
-    except json.JSONDecodeError as error:
-        raise WorklogError(f"plugin state file is invalid JSON: {path}") from error
-    if not isinstance(payload, dict):
-        raise WorklogError(f"plugin state file must contain a JSON object: {path}")
-    closed = payload.get("closed")
-    if "closed" in payload and not isinstance(closed, bool):
-        raise WorklogError("plugin state contains an invalid closed flag")
-    for key in (
-        "last_turn_token",
-        "last_appended_turn_token",
-        "last_verified_turn_token",
-        "last_skipped_turn_token",
-    ):
-        token = payload.get(key)
-        if key in payload and (
-            not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{16}", token)
-        ):
-            raise WorklogError(f"plugin state contains an invalid {key}")
-    for key in ("last_turn_requires_entry",):
-        if key in payload and not isinstance(payload.get(key), bool):
-            raise WorklogError(f"plugin state contains an invalid {key} flag")
-    intent = payload.get("last_turn_intent")
-    if intent is not None and intent not in PROMPT_INTENTS:
-        raise WorklogError("plugin state contains an invalid last_turn_intent")
-    previous = payload.get("previous_worklog_path")
-    if previous is not None and not isinstance(previous, str):
-        raise WorklogError("plugin state contains an invalid previous worklog path")
-    language = payload.get("language")
-    if language is not None and (
-        not isinstance(language, str) or re.fullmatch(r"[a-z]{2,3}", language) is None
-    ):
-        raise WorklogError("plugin state contains an invalid language")
-    return payload
-
-
-def _plugin_data(environment: Mapping[str, str]) -> Path:
-    raw_path = environment.get("PLUGIN_DATA") or environment.get("CLAUDE_PLUGIN_DATA")
-    if not isinstance(raw_path, str) or not raw_path:
-        raise WorklogError("PLUGIN_DATA is unavailable; no workspace file was written")
-    try:
-        path = Path(raw_path).expanduser()
-        if not path.is_absolute():
-            path = Path.cwd() / path
-        _ensure_private_directory(path)
-    except WorklogError:
-        raise
-    except (OSError, RuntimeError, ValueError) as error:
-        raise WorklogError(f"PLUGIN_DATA is not a usable path: {error}") from error
-    return path.absolute()
-
-
-def _workspace(payload: Mapping[str, Any]) -> Path:
-    raw_path = payload.get("cwd")
-    if not isinstance(raw_path, str) or not raw_path.strip():
-        raise WorklogError("the hook event did not include a working directory")
-    if "\x00" in raw_path:
-        raise WorklogError("the working directory path is invalid: embedded null byte")
-    try:
-        path = Path(raw_path).expanduser()
-        if not path.is_absolute():
-            path = Path.cwd() / path
-        path = path.absolute()
-        is_directory = path.is_dir()
-    except (OSError, RuntimeError, ValueError) as error:
-        raise WorklogError(f"the working directory path is invalid: {error}") from error
-    if not is_directory:
-        raise WorklogError(f"the session working directory does not exist: {path}")
-    if not _path_is_context_safe(path):
-        raise WorklogError(
-            "the working directory path contains unsupported unsafe characters"
-        )
+        # A host-provided cwd may itself be an OS alias (/var on macOS).
+        path = path.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise WorklogError("session cwd is unavailable") from error
+    if not path.is_dir():
+        raise WorklogError("session cwd must be a directory")
     return path
 
 
 def _worklog_directory_name(environment: Mapping[str, str]) -> str:
-    raw_value = environment.get("CODEX_WORKLOG_DIR", DEFAULT_DIRECTORY)
-    if not isinstance(raw_value, str):
-        raise WorklogError(
-            "CODEX_WORKLOG_DIR must be a safe, non-empty relative path without '..'"
-        )
-    raw_name = raw_value.strip()
-    candidate = Path(raw_name)
-    windows_candidate = PureWindowsPath(raw_name)
+    value = environment.get("CODEX_WORKLOG_DIR", DEFAULT_DIRECTORY)
+    if not isinstance(value, str) or not value or len(value) > 256:
+        raise WorklogError("CODEX_WORKLOG_DIR must be a bounded relative directory")
+    parts = value.split("/")
     if (
-        not raw_name
-        or candidate.is_absolute()
-        or windows_candidate.is_absolute()
-        or bool(windows_candidate.drive)
-        or bool(windows_candidate.root)
-        or raw_name in {".", ".."}
-        or ".." in candidate.parts
-        or "\\" in raw_name
-        or ":" in raw_name
-        or "`" in raw_name
-        or any(_unsafe_inline_character(character) for character in raw_name)
+        any(part in {"", ".", ".."} for part in parts)
+        or any(c in value for c in "\\:`")
+        or any(unicodedata.category(c).startswith("C") for c in value)
+        or Path(value).is_absolute() or PureWindowsPath(value).drive
     ):
-        raise WorklogError(
-            "CODEX_WORKLOG_DIR must be a safe, non-empty relative path without '..'"
-        )
-    return raw_name
-
-
-def _enforcement(environment: Mapping[str, str]) -> str:
-    value = environment.get("CODEX_WORKLOG_ENFORCEMENT", DEFAULT_ENFORCEMENT)
-    if not isinstance(value, str):
-        raise WorklogError("CODEX_WORKLOG_ENFORCEMENT must be strict, advisory, or off")
-    value = value.strip().lower()
-    if value not in ALLOWED_ENFORCEMENT:
-        raise WorklogError("CODEX_WORKLOG_ENFORCEMENT must be strict, advisory, or off")
+        raise WorklogError("CODEX_WORKLOG_DIR must be a safe relative directory")
     return value
 
 
-def _state_path(plugin_data: Path, session_id: str) -> Path:
-    sessions = plugin_data / "sessions"
-    _ensure_private_directory(sessions)
-    return sessions / f"{_token(session_id, 24)}.json"
+def _plugin_data(environment: Mapping[str, str]) -> Path:
+    return _absolute(environment.get("PLUGIN_DATA") or environment.get("CLAUDE_PLUGIN_DATA"), "PLUGIN_DATA")
 
 
-def _find_previous_worklog(
-    plugin_data: Path, workspace: Path, current_state_path: Path
-) -> Path | None:
-    candidates: list[tuple[int, str, Path]] = []
-    for candidate_state_path in (plugin_data / "sessions").glob("*.json"):
-        if (
-            candidate_state_path == current_state_path
-            or re.fullmatch(r"[0-9a-f]{24}\.json", candidate_state_path.name) is None
-        ):
-            continue
-        try:
-            state = _load_json(candidate_state_path)
-            workspace_value = state.get("workspace") if state is not None else None
-            if (
-                state is None
-                or not isinstance(workspace_value, str)
-                or not _same_existing_directory(Path(workspace_value), workspace)
-            ):
-                continue
-            raw_path = state.get("worklog_path")
-            if not isinstance(raw_path, str):
-                continue
-            path = _validate_worklog_path(workspace, Path(raw_path))
-            if not path.name.endswith(f"--{candidate_state_path.stem[:12]}.md"):
-                continue
-            if not _read_prefix(path, 64).startswith("# Codex Worklog\n"):
-                continue
-            candidates.append(
-                (candidate_state_path.stat().st_mtime_ns, str(path), path)
-            )
-        except (OSError, ValueError, WorklogError):
-            continue
-    if not candidates:
-        return None
-    return max(candidates)[2]
-
-
-def _new_worklog(
-    workspace: Path,
-    directory_name: str,
-    session_id: str,
-    now: datetime,
-    language: str,
-) -> Path:
-    relative_root = Path(directory_name)
-    session_token = _token(session_id, 12)
-    filename = f"{now:%Y-%m-%d--%H%M%S}--{session_token}.md"
-    candidate_path = workspace / relative_root / f"{now:%Y}" / f"{now:%m}" / filename
-    if not _path_is_context_safe(candidate_path):
-        raise WorklogError("worklog path contains unsupported unsafe characters")
-    _ensure_workspace_directory(workspace, relative_root)
-    daily_root = _ensure_workspace_directory(
-        workspace, relative_root / f"{now:%Y}" / f"{now:%m}"
+def _linked(status: os.stat_result) -> bool:
+    return stat.S_ISLNK(status.st_mode) or bool(
+        getattr(status, "st_file_attributes", 0) & 0x400  # Windows reparse point.
     )
-    path = daily_root / filename
-    metadata = _project_metadata(workspace)
-    header_lines = [
-        "# Codex Worklog",
-        "",
-        f"- {_localized(language, 'started')}: {now.isoformat(timespec='seconds')}",
-        f"- {_localized(language, 'project')}: `{metadata['project']}`",
-    ]
-    for key in ("repository", "branch", "head"):
-        if key in metadata:
-            label = "HEAD" if key == "head" else _localized(language, key)
-            header_lines.append(f"- {label}: `{metadata[key]}`")
-    header_lines.extend(("", f"## {_localized(language, 'timeline')}", ""))
-    header = "\n".join(header_lines)
-    try:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_CLOEXEC"):
-            flags |= os.O_CLOEXEC
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        if hasattr(os, "O_BINARY"):
-            flags |= os.O_BINARY
-        descriptor = os.open(path, flags, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
-            stream.write(header)
-            stream.flush()
-            os.fsync(stream.fileno())
-    except FileExistsError:
-        _validate_worklog_path(workspace, path)
-        existing_header = _read_prefix(path, 64)
-        if not existing_header.startswith("# Codex Worklog\n"):
-            raise WorklogError(f"existing worklog has an unexpected header: {path}")
-    except OSError as error:
-        raise WorklogError(
-            f"unable to create the workspace worklog: {error}"
-        ) from error
-    _private_mode(path, 0o600)
-    return path.absolute()
 
 
-def _state_worklog_path(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Path:
-    diary_value = state.get("worklog_path")
-    workspace_value = state.get("workspace")
-    if not isinstance(diary_value, str) or not isinstance(workspace_value, str):
-        raise WorklogError("plugin state is missing the workspace or worklog path")
-    workspace = _workspace(payload)
-    if not _same_existing_directory(Path(workspace_value), workspace):
-        raise WorklogError(
-            "stored workspace does not match the current session working directory"
-        )
-    return _validate_worklog_path(workspace, Path(diary_value))
+class _Directory:
+    """Anchor every path component; keep Windows ancestors non-renamable."""
 
-
-def _session_state(
-    payload: Mapping[str, Any],
-    environment: Mapping[str, str],
-    now: datetime,
-) -> tuple[dict[str, Any], Path]:
-    session_id = payload.get("session_id")
-    if not isinstance(session_id, str) or not session_id:
-        raise WorklogError("the hook event did not include a session id")
-    plugin_data = _plugin_data(environment)
-    state_path = _state_path(plugin_data, session_id)
-    workspace = _workspace(payload)
-    state = _load_json(state_path)
-    language = _system_language(environment)
-    if state is not None:
-        _state_worklog_path(state, payload)
-        state["closed"] = False
-        state["language"] = language
-        state["last_seen_at"] = now.isoformat(timespec="seconds")
-        _atomic_write_json(state_path, state)
-        return state, state_path
-
-    directory_name = _worklog_directory_name(environment)
-    previous_path = _find_previous_worklog(plugin_data, workspace, state_path)
-    worklog_path = _new_worklog(
-        workspace=workspace,
-        directory_name=directory_name,
-        session_id=session_id,
-        now=now,
-        language=language,
-    )
-    state = {
-        "closed": False,
-        "language": language,
-        "last_seen_at": now.isoformat(timespec="seconds"),
-        "previous_worklog_path": str(previous_path) if previous_path else None,
-        "started_at": now.isoformat(timespec="seconds"),
-        "workspace": str(workspace),
-        "worklog_path": str(worklog_path),
-    }
-    _atomic_write_json(state_path, state)
-    return state, state_path
-
-
-def _marker(turn_token: str) -> str:
-    return f"<!-- codex-worklog-turn:{turn_token} -->"
-
-
-def _contains_recent_marker(path: Path, marker: str) -> bool:
-    encoded_marker = marker.encode("utf-8")
-    descriptor = _open_regular_file(path, os.O_RDONLY)
-    try:
-        with os.fdopen(descriptor, "rb") as stream:
-            stream.seek(0, os.SEEK_END)
-            size = stream.tell()
-            stream.seek(max(0, size - TAIL_BYTES), os.SEEK_SET)
-            return encoded_marker in stream.read()
-    except OSError as error:
-        raise WorklogError(f"unable to inspect the worklog tail: {error}") from error
-
-
-def _validate_transition_fields(values: Mapping[str, str]) -> None:
-    unblocks = values.get("unblocks")
-    if unblocks is not None and (
-        "—" not in unblocks or ENTRY_REFERENCE_TIME_PATTERN.search(unblocks) is None
-    ):
-        raise WorklogError(
-            "append payload field unblocks must reference a timestamp and title "
-            "separated by an em dash"
-        )
-    supersedes = values.get("supersedes_status")
-    if supersedes is not None:
-        previous, separator, current = supersedes.partition("→")
-        if not separator or not previous.strip() or not current.strip():
-            raise WorklogError(
-                "append payload field supersedes_status must use U+2192 as the separator"
-            )
-
-
-def _render_artifacts(value: str, workspace: Path, worklog_path: Path) -> str:
-    matches = list(MARKDOWN_LINK_PATTERN.finditer(value))
-    if not matches:
-        raise WorklogError(
-            "append payload field artifacts must contain a Markdown link"
-        )
-    rendered: list[str] = []
-    previous_end = 0
-    try:
-        workspace_root = workspace.resolve(strict=True)
-        worklog_parent = worklog_path.parent.resolve(strict=True)
-    except (OSError, RuntimeError) as error:
-        raise WorklogError("artifact context is no longer available") from error
-    for match in matches:
-        raw_target = match.group(2).strip()
-        target = raw_target
-        if target.startswith("<") and target.endswith(">"):
-            target = target[1:-1]
+    def __init__(self, path: Path, create: bool = False):
+        self.path = path
+        self.fd: int | None = None
+        self.handles: list[Any] = []
+        self.kernel: Any = None
         try:
-            parsed = urlsplit(target)
-        except ValueError as error:
-            raise WorklogError(
-                "append payload field artifacts contains an invalid link"
-            ) from error
-        if parsed.scheme:
-            if (
-                parsed.scheme.casefold() != "https"
-                or not parsed.netloc
-                or parsed.username is not None
-                or parsed.password is not None
-            ):
-                raise WorklogError(
-                    "append payload field artifacts contains an unsafe external link"
-                )
-            rendered_target = raw_target
-        else:
-            local_target, separator, fragment = target.partition("#")
-            candidate_path = Path(local_target)
-            windows_candidate = PureWindowsPath(local_target)
-            if (
-                not local_target
-                or candidate_path.is_absolute()
-                or windows_candidate.is_absolute()
-                or ".." in candidate_path.parts
-                or "\\" in local_target
-                or "?" in local_target
-            ):
-                raise WorklogError(
-                    "append payload field artifacts must use a safe project-relative link"
-                )
+            if os.name == "nt":
+                self._windows_open(create)
+            else:
+                flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                self.fd = os.open(path.anchor, flags)
+                for part in path.parts[1:]:
+                    if create:
+                        try:
+                            os.mkdir(part, 0o700, dir_fd=self.fd)
+                        except FileExistsError:
+                            pass
+                    child = os.open(part, flags, dir_fd=self.fd)
+                    os.close(self.fd)
+                    self.fd = child
+        except (OSError, ValueError) as error:
+            self.close()
+            raise WorklogError("directory is unavailable, linked, or unsafe") from error
+
+    def _windows_open(self, create: bool) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        self.kernel.CreateFileW.argtypes = (
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+            wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+        )
+        self.kernel.CreateFileW.restype = wintypes.HANDLE
+        self.kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+        current = Path(self.path.anchor)
+        for part in self.path.parts[1:]:
+            current /= part
+            if create:
+                current.mkdir(mode=0o700, exist_ok=True)
+            # No FILE_SHARE_DELETE: an open ancestor cannot be renamed/replaced.
+            handle = self.kernel.CreateFileW(str(current), 0x80, 3, None, 3, 0x02200000, None)
+            if handle == ctypes.c_void_p(-1).value:
+                raise OSError("unable to anchor directory")
+            self.handles.append(handle)
+            status = current.lstat()
+            if _linked(status) or not stat.S_ISDIR(status.st_mode):
+                raise OSError("linked directory")
+
+    def close(self) -> None:
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+        for handle in reversed(self.handles):
+            self.kernel.CloseHandle(handle)
+        self.handles.clear()
+
+    def __enter__(self) -> _Directory:
+        return self
+
+    def __exit__(self, *_args: Any) -> None:
+        self.close()
+
+    def _name(self, name: str) -> str:
+        if not name or name in {".", ".."} or any(c in name for c in "/\\\0"):
+            raise WorklogError("invalid storage filename")
+        return name
+
+    def info(self, name: str) -> os.stat_result:
+        name = self._name(name)
+        if self.fd is not None:
+            return os.stat(name, dir_fd=self.fd, follow_symlinks=False)
+        return (self.path / name).lstat()
+
+    def open(self, name: str, flags: int, mode: int = 0o600) -> int:
+        name = self._name(name)
+        if flags & os.O_CREAT and not flags & os.O_EXCL:
+            # Never create through a dangling leaf link, including on Windows.
             try:
-                resolved = (workspace_root / candidate_path).resolve(strict=True)
-                resolved.relative_to(workspace_root)
-            except (OSError, RuntimeError, ValueError) as error:
-                raise WorklogError(
-                    "append payload field artifacts points outside the project or to a "
-                    "missing report"
-                ) from error
-            if not resolved.is_file():
-                raise WorklogError(
-                    "append payload field artifacts must link to a report file"
+                return self.open(name, flags | os.O_EXCL, mode)
+            except FileExistsError:
+                if _linked(self.info(name)):
+                    raise WorklogError("storage file is linked")
+                return self.open(name, flags & ~os.O_CREAT, mode)
+        flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
+        try:
+            fd = os.open(name if self.fd is not None else self.path / name, flags, mode, dir_fd=self.fd)
+        except (FileNotFoundError, FileExistsError):
+            raise
+        except OSError as error:
+            raise WorklogError("storage file is unavailable or linked") from error
+        try:
+            opened, current = os.fstat(fd), self.info(name)
+            if (
+                not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1 or _linked(current)
+                or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+            ):
+                raise WorklogError("storage file is linked or is not a regular file")
+            return fd
+        except BaseException:
+            os.close(fd)
+            raise
+
+    def read(self, name: str, limit: int) -> tuple[bytes, os.stat_result] | None:
+        try:
+            fd = self.open(name, os.O_RDONLY)
+        except FileNotFoundError:
+            return None
+        with os.fdopen(fd, "rb") as stream:
+            status = os.fstat(stream.fileno())
+            if status.st_size > limit:
+                raise WorklogError("storage file exceeds the size limit")
+            raw = stream.read(limit + 1)
+            if len(raw) > limit:
+                raise WorklogError("storage file exceeds the size limit")
+            return raw, status
+
+    def replace(self, name: str, raw: bytes, previous: os.stat_result | None) -> None:
+        temporary = f".{name}.{secrets.token_hex(8)}.tmp"
+        fd = self.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                if previous is not None and hasattr(os, "fchmod"):
+                    os.fchmod(stream.fileno(), stat.S_IMODE(previous.st_mode))
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+            try:
+                current = self.info(name)
+            except FileNotFoundError:
+                current = None
+            if (current is None) != (previous is None) or (
+                current is not None and previous is not None and (
+                    _linked(current) or current.st_nlink != 1
+                    or (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns)
+                    != (previous.st_dev, previous.st_ino, previous.st_size, previous.st_mtime_ns)
                 )
-            rendered_target = Path(
-                os.path.relpath(resolved, start=worklog_parent)
-            ).as_posix()
-            if separator:
-                rendered_target += f"#{fragment}"
-            if any(character.isspace() for character in rendered_target):
-                rendered_target = f"<{rendered_target}>"
-        rendered.append(value[previous_end : match.start(2)])
-        rendered.append(rendered_target)
-        previous_end = match.end(2)
-    rendered.append(value[previous_end:])
-    return "".join(rendered)
+            ):
+                raise WorklogError("storage file changed outside the worklog lock")
+            if self.fd is not None:
+                os.replace(temporary, name, src_dir_fd=self.fd, dst_dir_fd=self.fd)
+                os.fsync(self.fd)
+            else:
+                os.replace(self.path / temporary, self.path / name)
+        finally:
+            try:
+                if self.fd is not None:
+                    os.unlink(temporary, dir_fd=self.fd)
+                else:
+                    (self.path / temporary).unlink()
+            except FileNotFoundError:
+                pass
 
 
-def _append_entry(
-    payload: Mapping[str, Any],
-    now: datetime | None = None,
-    environment: Mapping[str, str] | None = None,
-    workspace: Path | None = None,
-) -> bool:
-    actual_keys = frozenset(payload)
-    missing = sorted(REQUIRED_APPEND_PAYLOAD_KEYS - actual_keys)
-    unexpected = sorted(actual_keys - ALLOWED_APPEND_PAYLOAD_KEYS)
-    if missing or unexpected:
-        details: list[str] = []
-        if missing:
-            details.append(f"missing fields: {', '.join(missing)}")
-        if unexpected:
-            details.append(f"unexpected fields: {', '.join(unexpected)}")
-        raise WorklogError(
-            f"append payload has the wrong schema ({'; '.join(details)})"
-        )
-
-    active_workspace = _workspace({"cwd": str(workspace or Path.cwd())})
-    raw_path = payload.get("worklog_path")
-    if not isinstance(raw_path, str) or not raw_path:
-        raise WorklogError("append payload worklog_path must be an absolute path")
+@contextmanager
+def _locked(directory: _Directory, name: str) -> Iterator[None]:
+    fd = directory.open(name, os.O_RDWR | os.O_CREAT)
+    acquired = False
     try:
-        path = Path(raw_path).expanduser()
-    except (OSError, RuntimeError, ValueError) as error:
-        raise WorklogError("append payload worklog_path is invalid") from error
-    if not path.is_absolute():
-        raise WorklogError("append payload worklog_path must be an absolute path")
-    path = _validate_worklog_path(active_workspace, path)
-
-    marker = payload.get("marker")
-    if not isinstance(marker, str) or TURN_MARKER_PATTERN.fullmatch(marker) is None:
-        raise WorklogError("append payload marker is invalid")
-    if _contains_recent_marker(path, marker):
-        return False
-    values = {key: _entry_value(payload, key) for key in REQUIRED_ENTRY_FIELD_NAMES}
-    optional_values = {
-        key: _entry_value(payload, key)
-        for key in OPTIONAL_ENTRY_FIELD_NAMES
-        if key in payload
-    }
-    _validate_transition_fields(optional_values)
-    if "artifacts" in optional_values:
-        optional_values["artifacts"] = _render_artifacts(
-            optional_values["artifacts"], active_workspace, path
-        )
-
-    timestamp = now or _now()
-    if timestamp.tzinfo is None:
-        timestamp = timestamp.astimezone()
-    language = _system_language(environment or os.environ)
-    lines = [f"- {_localized(language, 'summary')}: {values['summary']}"]
-    lines.extend(
-        f"- {_localized(language, key)}: {optional_values[key]}"
-        for key in OPTIONAL_ENTRY_FIELD_NAMES
-        if key in optional_values
-    )
-    entry = (
-        f"\n### {timestamp.isoformat(timespec='minutes')} — {values['title']}\n\n"
-        + "\n".join(lines)
-        + f"\n\n{marker}\n"
-    )
-    _append_text(path, entry)
-    return True
+        if os.name == "nt" and os.fstat(fd).st_size == 0:
+            os.write(fd, b"\0")
+        deadline = time.monotonic() + LOCK_TIMEOUT
+        while not acquired:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+            except OSError as error:
+                if time.monotonic() >= deadline:
+                    raise WorklogError("worklog is busy; submission remains staged for retry") from error
+                time.sleep(0.02)
+        opened, current = os.fstat(fd), directory.info(name)
+        if _linked(current) or current.st_nlink != 1 or (
+            opened.st_dev, opened.st_ino
+        ) != (current.st_dev, current.st_ino):
+            raise WorklogError("worklog lock was replaced")
+        yield
+    finally:
+        if acquired:
+            if os.name == "nt":
+                import msvcrt
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
-def _session_start(
-    payload: Mapping[str, Any], environment: Mapping[str, str], now: datetime
-) -> dict[str, Any]:
-    _session_state(payload, environment, now)
-    return {}
+def _json_bytes(value: Any) -> bytes:
+    try:
+        return (json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False) + "\n").encode("utf-8")
+    except (ValueError, TypeError, UnicodeError, RecursionError) as error:
+        raise WorklogError("value must be bounded UTF-8 JSON") from error
 
 
-def _user_prompt(
-    payload: Mapping[str, Any], environment: Mapping[str, str], now: datetime
-) -> dict[str, Any]:
-    state, state_path = _session_state(payload, environment, now)
-    turn_id = payload.get("turn_id")
-    if not isinstance(turn_id, str) or not turn_id:
-        raise WorklogError("the prompt hook did not include a turn id")
-    turn_token = _token(turn_id)
-    intent = _prompt_intent(payload.get("prompt"))
-    state["last_turn_started_at"] = now.isoformat(timespec="seconds")
-    state["last_turn_token"] = turn_token
-    state["last_turn_intent"] = intent
-    state["last_turn_requires_entry"] = intent not in {
-        "acknowledgement",
-        "context_recovery",
-    }
-    _atomic_write_json(state_path, state)
-    return {}
+def _json_object(raw: bytes) -> dict[str, Any]:
+    def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in items:
+            if key in result:
+                raise WorklogError("duplicate JSON keys are not allowed")
+            result[key] = value
+        return result
+
+    try:
+        value = json.loads(raw.decode("utf-8"), object_pairs_hook=pairs)
+    except (ValueError, UnicodeError, RecursionError) as error:
+        raise WorklogError("invalid UTF-8 JSON object") from error
+    if not isinstance(value, dict):
+        raise WorklogError("input must be a JSON object")
+    return value
 
 
-def _stop(
-    payload: Mapping[str, Any], environment: Mapping[str, str], now: datetime
-) -> dict[str, Any]:
-    session_id = payload.get("session_id")
-    if not isinstance(session_id, str) or not session_id:
-        return {}
-    plugin_data = _plugin_data(environment)
-    state_path = _state_path(plugin_data, session_id)
-    state = _load_json(state_path)
-    if state is None:
-        state, state_path = _session_state(payload, environment, now)
-    if state.get("closed") is True:
-        return {}
-    path = _state_worklog_path(state, payload)
-    turn_id = payload.get("turn_id")
-    turn_token = _token(turn_id) if isinstance(turn_id, str) and turn_id else None
-    if not turn_token:
-        stored_token = state.get("last_turn_token")
-        turn_token = stored_token if isinstance(stored_token, str) else None
-    if not turn_token:
-        return {}
-    stored_intent = state.get("last_turn_intent")
-    if (
-        turn_token != state.get("last_turn_token")
-        or stored_intent not in PROMPT_INTENTS
+def _validate_turns(state: Mapping[str, Any]) -> None:
+    turns = state["turns"]
+    if len(turns) > 128:
+        raise WorklogError("session has too many pending turns")
+    for key, turn in turns.items():
+        if not isinstance(turn, dict):
+            raise WorklogError("invalid turn state")
+        identity = _identity(turn.get("turn_id"), "stored turn_id")
+        status = turn.get("status")
+        if key != _token(identity) or not isinstance(status, str) or status not in {
+            "open", "staged", "committed", "skipped", "missing",
+        }:
+            raise WorklogError("invalid turn identity or status")
+        if status in {"staged", "committed"}:
+            try:
+                timestamp = datetime.fromisoformat(turn["submitted_at"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise WorklogError("invalid staged timestamp") from error
+            if timestamp.tzinfo is None or _language(turn.get("language")) != turn.get("language") or not turn.get("language"):
+                raise WorklogError("invalid staged language or timezone")
+            if not isinstance(turn.get("digest"), str) or re.fullmatch(r"[0-9a-f]{64}", turn["digest"]) is None:
+                raise WorklogError("invalid submission digest")
+        if status == "staged":
+            document = turn.get("submission")
+            if not isinstance(document, dict) or "entries" not in document:
+                raise WorklogError("staged submission is missing")
+            if hashlib.sha256(_json_bytes(document)).hexdigest() != turn["digest"]:
+                raise WorklogError("staged submission does not match its digest")
+        if status == "committed":
+            ids = turn.get("entry_ids")
+            if not isinstance(ids, list) or not 1 <= len(ids) <= MAX_ENTRIES or ids != _entry_ids(state["session_id"], identity, len(ids)):
+                raise WorklogError("invalid committed entry IDs")
+    for field in ("last_turn_id", "tool_turn_id", "context_turn_id"):
+        if field in state:
+            _identity(state[field], f"stored {field}")
+    if "session_language" in state and (
+        not state["session_language"] or _language(state["session_language"]) != state["session_language"]
     ):
-        stored_intent = (
-            "acknowledgement"
-            if turn_token == state.get("last_turn_token")
-            and state.get("last_turn_requires_entry") is False
-            else "unknown"
-        )
-    if stored_intent in {"acknowledgement", "context_recovery"}:
-        state["last_skipped_at"] = now.isoformat(timespec="seconds")
-        state["last_skipped_turn_token"] = turn_token
-        _atomic_write_json(state_path, state)
-        return {}
-    marker = _marker(turn_token)
-    if _contains_recent_marker(path, marker):
-        state["last_appended_at"] = now.isoformat(timespec="seconds")
-        state["last_appended_turn_token"] = turn_token
-        _atomic_write_json(state_path, state)
-        return {}
-    if state.get("last_skipped_turn_token") == turn_token:
-        return {}
+        raise WorklogError("invalid stored session language")
 
-    language = state.get("language")
-    if not isinstance(language, str):
-        language = _system_language(environment)
-    workspace_value = state.get("workspace")
-    if not isinstance(workspace_value, str):
-        raise WorklogError("plugin state is missing the workspace path")
-    entry = _automatic_entry(
-        payload.get("last_assistant_message"),
-        language,
-        stored_intent,
-        Path(workspace_value),
-        path,
+
+@contextmanager
+def _session(
+    session_id: str, workspace: Path, environment: Mapping[str, str],
+    now: datetime, create: bool = False,
+) -> Iterator[dict[str, Any]]:
+    session_id = _identity(session_id, "session_id")
+    root = _worklog_directory_name(environment)
+    name = f"{_token(session_id)}.json"
+    with _Directory(_plugin_data(environment) / "sessions-v2", create=create) as directory:
+        with _locked(directory, f"{_token(session_id)}.lock"):
+            previous = directory.read(name, MAX_STATE_BYTES)
+            if previous is None:
+                if not create:
+                    raise WorklogError("session state is missing; wait for SessionStart/UserPromptSubmit")
+                state: dict[str, Any] = {
+                    "version": 2, "session_id": session_id, "workspace": str(workspace),
+                    "directory": root, "turns": {}, "started_at": now.isoformat(),
+                }
+            else:
+                state = _json_object(previous[0])
+                if (
+                    state.get("version") != 2 or state.get("session_id") != session_id
+                    or state.get("workspace") != str(workspace)
+                    or not isinstance(state.get("turns"), dict)
+                ):
+                    raise WorklogError("session state does not match this workspace, session, or diary root")
+                _worklog_directory_name({"CODEX_WORKLOG_DIR": state.get("directory")})
+                _validate_turns(state)
+            before = _json_bytes(state) if previous else None
+            yield state
+            raw = _json_bytes(state)
+            if len(raw) > MAX_STATE_BYTES:
+                raise WorklogError("too many pending work blocks; commit staged work first")
+            if raw != before:
+                directory.replace(name, raw, previous[1] if previous else None)
+
+
+def _private_path(value: str) -> bool:
+    parts = value.replace("\\", "/").casefold().split("/")
+    return any(
+        p in {"private", ".ssh", ".gnupg", "credentials", "credentials.json", "id_rsa", "id_ed25519"}
+        or p == ".env" or p.startswith(".env.") for p in parts
     )
-    if entry is None:
-        state["last_skipped_at"] = now.isoformat(timespec="seconds")
-        state["last_skipped_turn_token"] = turn_token
-        state["last_turn_requires_entry"] = False
-        _atomic_write_json(state_path, state)
-        return {}
-    _append_entry(
-        {
-            "worklog_path": str(path),
-            "marker": marker,
-            **entry,
-        },
-        now=now,
-        environment=environment,
-        workspace=Path(workspace_value),
-    )
-    state["last_appended_at"] = now.isoformat(timespec="seconds")
-    state["last_appended_turn_token"] = turn_token
-    state["last_turn_token"] = turn_token
-    state["last_turn_intent"] = stored_intent
-    state["last_turn_requires_entry"] = True
-    _atomic_write_json(state_path, state)
-    return {}
 
 
-def _session_end(
-    payload: Mapping[str, Any], environment: Mapping[str, str], now: datetime
-) -> dict[str, Any]:
-    session_id = payload.get("session_id")
-    if not isinstance(session_id, str) or not session_id:
-        return {}
-    plugin_data = _plugin_data(environment)
-    state_path = _state_path(plugin_data, session_id)
-    state = _load_json(state_path)
-    if state is None:
-        return {}
-    if state.get("closed") is True:
-        return {}
-    _state_worklog_path(state, payload)
-    state["closed"] = True
-    state["last_seen_at"] = now.isoformat(timespec="seconds")
-    _atomic_write_json(state_path, state)
-    return {}
+def _local_reference(value: str, workspace: Path) -> str | None:
+    value = unquote(value)
+    suffix = ""
+    match = re.fullmatch(r"(.+?):(\d+)(?::\d+)?", value)
+    if match and not re.fullmatch(r"[A-Za-z]:", match.group(1)):
+        value, suffix = match.group(1), f"#L{match.group(2)}"
+    if value.startswith("~/"):
+        return None
+    if os.name != "nt" and (PureWindowsPath(value).drive or "\\" in value):
+        return None
+    candidate = Path(value)
+    if ".." in candidate.parts:
+        return None
+    if candidate.is_absolute():
+        try:
+            candidate = candidate.relative_to(workspace)
+        except ValueError:
+            return None
+    if not candidate.parts or str(candidate) == ".":
+        return None
+    # Protect project-relative private paths, not OS/workspace ancestors such
+    # as macOS /private/var. The workspace is already canonical and host-bound.
+    if _private_path(candidate.as_posix()):
+        return None
+    current = workspace
+    for part in candidate.parts:
+        current /= part
+        try:
+            if _linked(current.lstat()):
+                return None
+        except FileNotFoundError:
+            # Deleted files and not-yet-created next-step paths remain useful references.
+            pass
+    return candidate.as_posix() + suffix
 
 
-def handle_event(
-    payload: Mapping[str, Any],
-    environment: Mapping[str, str] | None = None,
+def _remote_reference(value: str) -> str | None:
+    try:
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"https", "http"} or not parsed.hostname:
+            return None
+        if parsed.scheme == "http" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
+            return None
+        if parsed.username is not None or parsed.password is not None:
+            return None
+        if SECRET_PARAMETER.search(unquote(parsed.query)) or SECRET_PARAMETER.search(unquote(parsed.fragment)):
+            return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+        return value
+    except ValueError:
+        return None
+
+
+def _normalize_link(match: re.Match[str], workspace: Path) -> str:
+    label, target = match.group(1), match.group(2).strip("<>")
+    if re.match(r"[A-Za-z][A-Za-z0-9+.-]*://", target):
+        normalized = _remote_reference(target)
+    else:
+        normalized = _local_reference(target, workspace)
+    if normalized is None:
+        return "[private or unsafe reference]"
+    return f"[{label}](<{normalized}>)"
+
+
+def _text(value: object, workspace: Path, label: str, limit: int = MAX_ITEM_CHARS) -> str:
+    if not isinstance(value, str) or not value.strip() or len(value) > limit:
+        raise WorklogError(f"{label} must be non-empty text of at most {limit} characters")
+    value = unicodedata.normalize("NFC", value.strip().replace("\r\n", "\n"))
+    if any(unicodedata.category(c) in {"Cc", "Cf", "Cs"} and c != "\n" for c in value):
+        raise WorklogError(f"{label} contains unsafe control characters")
+    if "<!--" in value or "-->" in value or re.search(r"(?m)^\s*(?:#{1,6}\s|::|```|~~~)", value):
+        raise WorklogError(f"{label} contains reserved Markdown structure")
+    if re.search(r"</?[A-Za-z][A-Za-z0-9-]*(?:\s+[^<>]*|\s*/?)>", LINK.sub(lambda m: m.group(1), value)):
+        raise WorklogError(f"{label} contains raw HTML")
+    value = PRIVATE_KEY.sub("[private key redacted]", value)
+    value = ASSIGNMENT.sub(lambda m: f"{m.group(1)}=[redacted]", value)
+    value = AUTHORIZATION.sub(lambda m: f"{m.group(1)} [redacted]", value)
+    value = SECRET_ARGUMENT.sub(lambda m: f"{m.group(1)}=[redacted]", value)
+    value = KNOWN_SECRET.sub("[redacted]", value)
+    # Preserve links/inline code as units so absolute paths containing spaces survive.
+    units: list[str] = []
+
+    def hold(text: str) -> str:
+        units.append(text)
+        return f"\x00{len(units) - 1}\x00"
+
+    value = LINK.sub(lambda m: hold(_normalize_link(m, workspace)), value)
+
+    def code(match: re.Match[str]) -> str:
+        body = match.group(1)
+        if body.startswith(("/", "~/", "\\\\")) or PureWindowsPath(body).drive:
+            body = _local_reference(body, workspace) or "[private or external path]"
+        else:
+            body = URL.sub(lambda m: _remote_reference(m.group(0)) or "[private link]", body)
+            body = ABSOLUTE.sub(lambda m: _local_reference(m.group(0), workspace) or "[external path]", body)
+            if _private_path(body):
+                body = "[private path]"
+        return hold(f"`{body}`")
+
+    value = re.sub(r"`([^`\n]+)`", code, value)
+    value = URL.sub(lambda m: hold(_remote_reference(m.group(0)) or "[private link]"), value)
+    value = ABSOLUTE.sub(lambda m: _local_reference(m.group(0), workspace) or "[external path]", value)
+    # Protect only our exact placeholders, after links/code are already held.
+    # Holding them earlier would nest units inside units during inline parsing.
+    value = re.sub(r"\[private (?:path|link|key redacted|or external path|or unsafe reference)\]",
+                   lambda m: hold(m.group(0)), value, flags=re.I)
+    value = re.sub(r"(?<!\w)(?:[\w.-]+/)*(?:private|\.ssh|\.gnupg|\.env)(?:/[^\s`]+)?", "[private path]", value, flags=re.I)
+    value = re.sub(r"\x00(\d+)\x00", lambda m: units[int(m.group(1))], value)
+    if len(value) > limit:
+        raise WorklogError(f"{label} exceeds {limit} characters after sanitization; shorten the item")
+    return value
+
+
+def _items(value: object, workspace: Path, label: str, optional: bool = False) -> list[str]:
+    if not isinstance(value, list) or len(value) > MAX_ITEMS or (not value and not optional):
+        raise WorklogError(f"{label} must contain {'0' if optional else '1'}..{MAX_ITEMS} text items")
+    return [_text(item, workspace, label) for item in value]
+
+
+def _validate_document(document: Mapping[str, Any], workspace: Path) -> dict[str, Any]:
+    if len(_json_bytes(document)) > MAX_APPEND_INPUT_BYTES:
+        raise WorklogError("submission exceeds 64 KiB")
+    if set(document) == {"skip"}:
+        if not isinstance(document["skip"], str) or document["skip"] not in SKIP_REASONS:
+            raise WorklogError("unknown skip reason")
+        return dict(document)
+    if set(document) - {"language", "entries"} or "entries" not in document:
+        raise WorklogError("submission requires entries and optional language; paths and markers are not accepted")
+    result: dict[str, Any] = {"entries": []}
+    if "language" in document:
+        language = _language(document["language"])
+        if language is None:
+            raise WorklogError("language must be a language code")
+        result["language"] = language
+    entries = document["entries"]
+    if not isinstance(entries, list) or not 1 <= len(entries) <= MAX_ENTRIES:
+        raise WorklogError("entries must contain 1..8 independent work blocks")
+    titles: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) - ENTRY_KEYS or REQUIRED_KEYS - set(entry):
+            raise WorklogError("each entry requires title and all six semantic sections")
+        title = _text(entry["title"], workspace, "title", 160)
+        if "\n" in title or len(title) < 12 or title.casefold().strip(".! ") in {
+            "готово", "ты прав", "исправил", "переделал", "done", "completed", "work completed",
+        }:
+            raise WorklogError("title must name a self-contained concrete result")
+        if title in titles:
+            raise WorklogError("duplicate work block titles; consolidate the same work")
+        titles.add(title)
+        normalized = {"title": title}
+        normalized.update({key: _items(entry[key], workspace, key) for key in TEXT_FIELDS})
+        timeline = entry["timeline"]
+        if not isinstance(timeline, list) or not 1 <= len(timeline) <= MAX_ITEMS:
+            raise WorklogError("timeline requires 1..32 phases (use null for unknown time)")
+        normalized["timeline"] = []
+        for phase in timeline:
+            if not isinstance(phase, dict) or set(phase) != {"time", "items"}:
+                raise WorklogError("timeline phases require time and items")
+            clock = phase["time"]
+            if clock is not None:
+                if not isinstance(clock, str):
+                    raise WorklogError("timeline time must be HH:MM, timezone ISO date, or null")
+                if re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", clock) is None:
+                    try:
+                        parsed = datetime.fromisoformat(clock.removesuffix("Z") + "+00:00" if clock.endswith("Z") else clock)
+                        if parsed.tzinfo is None:
+                            raise ValueError
+                        clock = parsed.isoformat()
+                    except ValueError as error:
+                        raise WorklogError("timeline time must be HH:MM, timezone ISO date, or null") from error
+            normalized["timeline"].append({"time": clock, "items": _items(phase["items"], workspace, "timeline items")})
+        normalized["artifacts"] = _items(entry.get("artifacts", []), workspace, "artifacts", optional=True)
+        supersedes = entry.get("supersedes", [])
+        if not isinstance(supersedes, list) or len(supersedes) > MAX_ITEMS or any(
+            not isinstance(item, str) or re.fullmatch(r"[0-9a-f]{24}", item) is None for item in supersedes
+        ):
+            raise WorklogError("supersedes must contain generated 24-character entry IDs")
+        normalized["supersedes"] = list(dict.fromkeys(supersedes))
+        result["entries"].append(normalized)
+    if len(_json_bytes(result)) > MAX_APPEND_INPUT_BYTES:
+        raise WorklogError("normalized submission exceeds 64 KiB")
+    return result
+
+
+def _entry_ids(session_id: str, turn_id: str, count: int) -> list[str]:
+    return [_token(f"{session_id}\0{turn_id}\0{index}") for index in range(count)]
+
+
+def _link_from_diary(match: re.Match[str], depth: int) -> str:
+    target = match.group(2).strip("<>")
+    if target.lower().startswith(("https://", "http://")):
+        return match.group(0)
+    return f"[{match.group(1)}](<{'../' * depth}{target}>)"
+
+
+def _bullet(value: str, depth: int, indent: str = "") -> str:
+    value = LINK.sub(lambda m: _link_from_diary(m, depth), value)
+    lines = value.splitlines()
+    return f"{indent}- {lines[0]}\n" + "".join(f"{indent}  {line}\n" for line in lines[1:])
+
+
+def _render_entry(entry: Mapping[str, Any], entry_id: str, state: Mapping[str, Any],
+                  turn: Mapping[str, Any], language: str) -> str:
+    timestamp = datetime.fromisoformat(turn["submitted_at"])
+    offset = timestamp.strftime("%z")
+    stamp = f"{timestamp:%Y-%m-%d %H:%M} {offset[:3]}:{offset[3:]}"
+    labels = LABELS.get(language, LABELS["en"])
+    depth = len(Path(state["directory"]).parts) + 2
+    output = [f"\n## {stamp} — {entry['title']}\n\n",
+              f"<!-- codex-worklog-session:{state['session_id']} turn:{turn['turn_id']} -->\n"]
+    for key, label in zip(("context", "timeline", "changes", "decisions", "checks", "next_steps"), labels):
+        output.append(f"\n### {label}\n\n")
+        if key == "timeline":
+            for phase in entry[key]:
+                clock = phase["time"] or ("Время не зафиксировано" if language == "ru" else "Time not recorded")
+                output.append(f"- `{clock}`\n")
+                output.extend(_bullet(item, depth, "  ") for item in phase["items"])
+        else:
+            output.extend(_bullet(item, depth) for item in entry[key])
+        if key == "decisions" and entry["supersedes"]:
+            label = "Заменяет записи" if language == "ru" else "Supersedes entries"
+            output.append(f"- {label}: " + ", ".join(f"`{i}`" for i in entry["supersedes"]) + ".\n")
+        if key == "checks":
+            output.extend(_bullet(item, depth) for item in entry["artifacts"])
+    output.append(f"\n<!-- codex-worklog-entry:{entry_id} -->\n")
+    return "".join(output)
+
+
+def _check_supersedes(state: Mapping[str, Any], entries: list[dict[str, Any]], ids: list[str]) -> None:
+    missing = {identity for entry in entries for identity in entry["supersedes"]}
+    if missing.intersection(ids):
+        raise WorklogError("entries cannot supersede themselves or the same submission")
+    if not missing:
+        return
+    root = Path(state["workspace"]) / state["directory"]
+    remaining = 128 * 1024 * 1024
+    days = 0
+    if root.exists():
+        # ponytail: bounded scan only when correcting an entry; add an index if
+        # real history reaches the 4096-day / 128 MiB lookup ceiling.
+        with _Directory(root) as years:
+            for year in sorted(os.listdir(years.fd if years.fd is not None else years.path), reverse=True):
+                if re.fullmatch(r"\d{4}", year) is None:
+                    continue
+                with _Directory(root / year) as months:
+                    for month in sorted(os.listdir(months.fd if months.fd is not None else months.path), reverse=True):
+                        if re.fullmatch(r"(?:0[1-9]|1[0-2])", month) is None:
+                            continue
+                        with _Directory(root / year / month) as directory:
+                            for name in sorted(os.listdir(directory.fd if directory.fd is not None else directory.path), reverse=True):
+                                if re.fullmatch(rf"{year}-{month}-\d{{2}}\.md", name) is None:
+                                    continue
+                                days += 1
+                                if days > 4096:
+                                    raise WorklogError("supersedes history lookup exceeds 4096 days")
+                                previous = directory.read(name, min(MAX_DAY_BYTES, remaining))
+                                if previous is None:
+                                    continue
+                                raw = previous[0]
+                                remaining -= len(raw)
+                                if not raw.startswith(f"# Codex Worklog — {name[:-3]}\n".encode()):
+                                    raise WorklogError("supersedes history has an unexpected daily header")
+                                missing.difference_update(match.decode() for match in re.findall(
+                                    rb"(?m)^<!-- codex-worklog-entry:([0-9a-f]{24}) -->$", raw,
+                                ))
+                                if not missing:
+                                    return
+    raise WorklogError("supersedes references an unknown entry in this workspace diary")
+
+
+def _commit(state: dict[str, Any], turn: dict[str, Any]) -> bool:
+    document = turn.get("submission")
+    if not isinstance(document, dict):
+        return False
+    workspace = _workspace(state["workspace"])
+    # Revalidate private staging too; its directory is trusted, its JSON still isn't.
+    document = _validate_document(document, workspace)
+    timestamp = datetime.fromisoformat(turn["submitted_at"])
+    if timestamp.tzinfo is None:
+        raise WorklogError("staged time is missing its timezone")
+    date = timestamp.strftime("%Y-%m-%d")
+    relative = Path(state["directory"]) / f"{timestamp:%Y}" / f"{timestamp:%m}"
+    language = turn["language"]
+    ids = _entry_ids(state["session_id"], turn["turn_id"], len(document["entries"]))
+    _check_supersedes(state, document["entries"], ids)
+    blocks = b"".join(_render_entry(entry, identity, state, turn, language).encode("utf-8")
+                      for entry, identity in zip(document["entries"], ids))
+    header = f"# Codex Worklog — {date}\n".encode("utf-8")
+    name = f"{date}.md"
+    with _Directory(workspace / relative, create=True) as directory:
+        with _locked(directory, f".{date}.lock"):
+            previous = directory.read(name, MAX_DAY_BYTES)
+            raw = previous[0] if previous else header
+            if not raw.startswith(header) or not raw.endswith(b"\n"):
+                raise WorklogError("daily worklog has an unexpected header or incomplete final line")
+            markers = [f"<!-- codex-worklog-entry:{identity} -->".encode() for identity in ids]
+            present = [marker in raw for marker in markers]
+            if any(present):
+                if not all(present) or blocks not in raw:
+                    raise WorklogError("entry ID already exists with different content")
+                appended = False
+            else:
+                if len(raw) + len(blocks) > MAX_DAY_BYTES:
+                    raise WorklogError("daily worklog exceeds 32 MiB; pending blocks were retained")
+                # ponytail: copy at most 32 MiB for atomic content append; use streaming
+                # copy if measured large-day latency becomes significant.
+                directory.replace(name, raw + blocks, previous[1] if previous else None)
+                appended = True
+    turn["status"] = "committed"
+    turn["entry_ids"] = ids
+    turn.pop("submission", None)
+    return appended
+
+
+def _stage_entry(
+    document: Mapping[str, Any], session_id: str, turn_id: str,
+    environment: Mapping[str, str] | None = None, workspace: Path | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Handle one Codex hook event and return its JSON response."""
+    env = environment if environment is not None else os.environ
+    if env.get("CODEX_WORKLOG_ENFORCEMENT") == "off":
+        raise WorklogError("worklog is disabled")
+    timestamp = _timestamp(now)
+    active_workspace = _workspace(workspace or Path.cwd())
+    turn_id = _identity(turn_id, "turn_id")
+    if not isinstance(document, Mapping):
+        raise WorklogError("submission must be a JSON object")
+    normalized = _validate_document(document, active_workspace)
+    digest = hashlib.sha256(_json_bytes(normalized)).hexdigest()
+    with _session(session_id, active_workspace, env, timestamp) as state:
+        turn = state["turns"].get(_token(turn_id))
+        if not isinstance(turn, dict) or turn.get("turn_id") != turn_id:
+            raise WorklogError("turn was not initialized by UserPromptSubmit or PreToolUse")
+        if turn.get("status") == "committed" and turn.get("digest") == digest:
+            return {"staged": False, "already_recorded": True,
+                    "entry_ids": turn["entry_ids"], "turn_id": turn_id}
+        # An already-open task may still execute the literal command from an
+        # old guide. Only this same host session's PreToolUse binding can move
+        # a new payload to its actual turn; explicit/offline retries stay strict.
+        active = state.get("tool_turn_id")
+        if (env.get("CODEX_THREAD_ID") == session_id and active
+                and active == state.get("last_turn_id") and active != turn_id):
+            turn_id = active
+            turn = state["turns"].get(_token(turn_id))
+            if not isinstance(turn, dict) or turn.get("turn_id") != turn_id:
+                raise WorklogError("host tool turn has no initialized state")
+        if turn.get("status") == "committed":
+            if turn.get("digest") != digest:
+                raise WorklogError("turn is already recorded; use a new turn and supersedes")
+            return {"staged": False, "already_recorded": True,
+                    "entry_ids": turn["entry_ids"], "turn_id": turn_id}
+        if state.get("last_turn_id") != turn_id:
+            raise WorklogError("submission belongs to an older turn")
+        if turn.get("status") == "staged" and turn.get("digest") == digest:
+            return {"staged": True, "digest": digest, "turn_id": turn_id}
+        if "skip" in normalized:
+            turn.update(status="skipped", skip=normalized["skip"])
+            turn.pop("submission", None)
+            return {"staged": False, "skipped": True}
+        language = state.get("session_language") or normalized.get("language") or _system_language(env)
+        submitted_at = timestamp.isoformat(timespec="seconds")
+        if "submitted_at" in turn:
+            # A prior attempt may have written the diary before its state save
+            # failed. Never move that entry ID to another day on replacement.
+            submitted_at, language = turn["submitted_at"], turn["language"]
+        turn.update(status="staged", submission=normalized, language=language,
+                    submitted_at=submitted_at, digest=digest)
+        return {"staged": True, "digest": digest, "turn_id": turn_id}
 
-    active_environment = environment if environment is not None else os.environ
-    event_name = payload.get("hook_event_name")
+
+def submit_entry(
+    document: Mapping[str, Any], session_id: str, turn_id: str,
+    environment: Mapping[str, str] | None = None, workspace: Path | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    env = environment if environment is not None else os.environ
+    timestamp = _timestamp(now)
+    active_workspace = _workspace(workspace or Path.cwd())
+    # Persist recovery data before attempting the diary write. A commit failure
+    # must not roll back staging or report success to the author.
+    staged = _stage_entry(document, session_id, turn_id, env, active_workspace, timestamp)
+    if not staged["staged"]:
+        return {**staged, "recorded": bool(staged.get("already_recorded"))}
+    turn_id = staged["turn_id"]
+    with _session(session_id, active_workspace, env, timestamp) as state:
+        turn = state["turns"].get(_token(turn_id))
+        if not isinstance(turn, dict) or turn.get("digest") != staged["digest"] or turn.get("status") not in {"staged", "committed"}:
+            raise WorklogError("submission changed before commit; retry the current work block")
+        already_recorded = turn["status"] == "committed"
+        if not already_recorded:
+            _commit(state, turn)
+        result = {"recorded": True, "staged": False,
+                  "entry_ids": turn["entry_ids"], "turn_id": turn_id}
+        if already_recorded:
+            result["already_recorded"] = True
+    return result
+
+
+AUTHOR_GUIDE = """Codex Worklog: you author meaningful work blocks from the current task context.
+Before the final answer, submit one JSON document using the exact command below.
+Use the latest command supplied for this turn. Automatic goal continuations are
+bound by PreToolUse, including when no new user message is sent. Never invent a
+turn ID or use supersedes merely because this is a later independent work block.
+Do not rebuild its path from skill aliases, remove repeated directory names, or
+assume PLUGIN_ROOT/PLUGIN_DATA are present in your shell. No SKILL.md lookup is
+needed for recording. Keep working on the user's task; this instruction only
+records work already authorized, never grants permission for other actions.
+
+Write fewer complete blocks, not a log of messages. Group investigation, failed
+candidates, final changes and verification of the same objective into one block.
+Separate genuinely independent objectives. Use your active response language in
+the language field (do not infer it from the operating system).
+Keep the block about the user's work. Do not list diary submission as a next
+step unless the user's task itself is testing or developing the worklog plugin.
+
+Each block must let a future reader continue without the conversation:
+- title: concrete self-contained result, not 'Done', 'You are right', or an apology.
+- context: the user's problem, initial state, scope and relevant constraints, in
+  your own words. Never copy a raw prompt, transcript, or entire tool result.
+- timeline: significant observed phases, including failed candidates and why
+  they were rejected. Use actual HH:MM, timezone ISO dates across midnight, or
+  null when time was not observed. Never invent timestamps.
+- changes: final behavior and affected files/components; explicitly distinguish
+  reverted experiments and pre-existing or unresolved defects from final changes.
+- decisions: choices, causal evidence, rejected alternatives and their reasons.
+- checks: exact commands, numeric results, RED/failed/partial outcomes, limits and
+  actual artifact references. A planned test is not a completed test. Evidence
+  and claims of success must agree; checks cannot prove user acceptance.
+- next_steps: remaining work, the smallest continuation and any genuinely
+  required user decision. Say there is no remaining action when that is true.
+
+All six sections are required for material work. If one does not apply, explain
+that briefly and truthfully. Items may contain inline Markdown and line breaks;
+do not add section headings, HTML, code fences, or reserved worklog markers.
+Preserve full SHA-256 digests, commands, filenames and artifact IDs as evidence.
+Use project-relative paths, Markdown links for artifacts, no secrets/private
+content. Absolute in-workspace paths are normalized. Summarize relevant Git
+baseline once, your actual delta, and a new commit only when it changed; never
+dump full git status or attach Git metadata to non-repository work.
+
+For acknowledgement, routine history recovery with no new findings, trivial
+answers, or already recorded results submit {\"skip\":\"no_material_work\"} instead.
+Do not rewrite existing diaries. Use supersedes entry IDs for a later correction.
+The submit helper saves the daily diary before returning recorded:true. Stop and
+SessionEnd only retry pending work. Check the JSON success response; staged data
+alone is not a saved diary. Fix a rejected payload or retry a failed write before
+your final answer. If submission is unavailable, report that limitation; do not
+manually edit diary/state files. Correct a recorded block in a new turn using
+supersedes, never by replacing the same turn's submission.
+"""
+
+
+def _author_context(state: Mapping[str, Any], environment: Mapping[str, str], turn_id: str | None) -> str:
+    if not turn_id:
+        skill = Path(__file__).resolve().parents[1] / "skills" / "worklog" / "SKILL.md"
+        return ("Codex Worklog records model-authored work blocks. UserPromptSubmit or "
+                "PreToolUse supplies the current turn's exact submission command and schema. "
+                "After resume/compaction, the next local tool refreshes that context; do not "
+                "reuse a command from a previous turn. No diary is created for empty sessions. "
+                "For requested history inspection, the exact skill path is "
+                + json.dumps(str(skill), ensure_ascii=False)
+                + ". Preserve repeated directory names; they are not a stale installation. "
+                + "Current workspace diary root: " + json.dumps(state["directory"]) + ".")
+    if state["turns"][_token(turn_id)]["status"] == "committed":
+        return ("Codex Worklog: this turn is already recorded. Do not submit another block "
+                "for it or rewrite the diary. The next host turn will get its own binding.")
+    command = [sys.executable, "-B", str(Path(__file__).resolve()), "submit", "--data",
+               str(_plugin_data(environment)), "--session", state["session_id"], "--turn", turn_id]
+    quoted = subprocess.list2cmdline(command) if os.name == "nt" else shlex.join(command)
+    example = {
+        "language": "<active response language code>",
+        "entries": [{"title": "<concrete result>", "context": ["<problem and initial state>"],
+                     "timeline": [{"time": None, "items": ["<observed phase and result>"]}],
+                     "changes": ["<final behavior>"], "decisions": ["<choice and reason>"],
+                     "checks": ["<actual check, result and limits>"],
+                     "next_steps": ["<remaining work>"], "artifacts": [], "supersedes": []}],
+    }
+    return (AUTHOR_GUIDE + f"\nRun from cwd: {json.dumps(state['workspace'], ensure_ascii=False)}\n"
+            f"Command (send JSON on stdin; use a quoted heredoc on POSIX):\n{quoted}\n"
+            "Schema example (replace placeholders; 1..8 blocks, 1..32 items/section, "
+            "4096 characters/item, 64 KiB/document):\n" + json.dumps(example, ensure_ascii=False))
+
+
+def _event_context(event: str, context: str) -> dict[str, Any]:
+    return {"hookSpecificOutput": {"hookEventName": event, "additionalContext": context}}
+
+
+def _bind_turn(state: dict[str, Any], turn_id: str) -> dict[str, Any]:
+    key = _token(turn_id)
+    if key not in state["turns"]:
+        for old_key, old in list(state["turns"].items()):
+            if len(state["turns"]) < 128:
+                break
+            if old["status"] in {"committed", "skipped", "missing"}:
+                del state["turns"][old_key]
+        if len(state["turns"]) >= 128:
+            raise WorklogError("too many pending turns; commit staged work first")
+        state["turns"][key] = {"turn_id": turn_id, "status": "open"}
+    state["last_turn_id"] = turn_id
+    return state["turns"][key]
+
+
+def handle_event(payload: Mapping[str, Any], environment: Mapping[str, str] | None = None,
+                 now: datetime | None = None) -> dict[str, Any]:
+    env = environment if environment is not None else os.environ
+    if not isinstance(payload, Mapping):
+        return {"systemMessage": "Codex Worklog: hook input must be a JSON object."}
+    event = payload.get("hook_event_name")
+    if not isinstance(event, str) or event not in {"SessionStart", "UserPromptSubmit", "PreToolUse", "Stop", "SessionEnd"}:
+        return {}
     try:
-        enforcement = _enforcement(active_environment)
+        enforcement = env.get("CODEX_WORKLOG_ENFORCEMENT", "strict")
+        if enforcement not in {"strict", "advisory", "off"}:
+            raise WorklogError("CODEX_WORKLOG_ENFORCEMENT must be strict, advisory, or off")
         if enforcement == "off":
             return {}
-        current_time = now or _now()
-        if event_name == "SessionStart":
-            return _session_start(payload, active_environment, current_time)
-        if event_name == "UserPromptSubmit":
-            return _user_prompt(payload, active_environment, current_time)
-        if event_name == "Stop":
-            return _stop(payload, active_environment, current_time)
-        if event_name == "SessionEnd":
-            return _session_end(payload, active_environment, current_time)
-        return {}
-    except WorklogError as error:
-        return {"systemMessage": f"Codex Worklog: {_safe_inline(error)}."}
-
-
-def _append_main() -> int:
-    try:
-        raw_payload = sys.stdin.buffer.read(MAX_APPEND_INPUT_BYTES + 1)
-        if len(raw_payload) > MAX_APPEND_INPUT_BYTES:
-            raise WorklogError("append request is too large")
-        payload = json.loads(raw_payload.decode("utf-8"))
-        if not isinstance(payload, dict):
-            raise WorklogError("append request must be a JSON object")
-        appended = _append_entry(payload)
-    except (json.JSONDecodeError, UnicodeError, WorklogError) as error:
-        print(f"Codex Worklog append failed: {_safe_inline(error)}.", file=sys.stderr)
-        return 2
-    except Exception as error:  # noqa: BLE001 - CLI boundary must not leak a traceback.
-        print(
-            f"Codex Worklog append internal error: {type(error).__name__}",
-            file=sys.stderr,
-        )
-        return 2
-    json.dump({"appended": appended}, sys.stdout, separators=(",", ":"))
-    sys.stdout.write("\n")
-    return 0
-
-
-def _hook_main() -> int:
-    try:
-        payload = json.load(sys.stdin)
-        if not isinstance(payload, dict):
-            raise TypeError("hook input must be a JSON object")
-        response = handle_event(payload)
-    except (json.JSONDecodeError, TypeError, ValueError) as error:
-        response = {
-            "systemMessage": f"Codex Worklog received invalid hook input: {error}."
-        }
-    except Exception as error:  # noqa: BLE001 - hooks must not crash Codex.
-        print(
-            f"Codex Worklog internal error: {type(error).__name__}: {error}",
-            file=sys.stderr,
-        )
-        response = {"systemMessage": "Codex Worklog encountered an internal error."}
-    json.dump(response, sys.stdout, ensure_ascii=False, separators=(",", ":"))
-    sys.stdout.write("\n")
-    return 0
+        timestamp = _timestamp(now)
+        workspace = _workspace(payload.get("cwd"))
+        session_id = _identity(payload.get("session_id"), "session_id")
+        with _session(session_id, workspace, env, timestamp, create=event in {"SessionStart", "UserPromptSubmit", "PreToolUse"}) as state:
+            # Optional adapter field; current Codex hooks do not guarantee language.
+            if "session_language" in payload:
+                language = _language(payload["session_language"])
+                if language is None:
+                    raise WorklogError("session_language must be a language code")
+                state["session_language"] = language
+            if event == "SessionStart":
+                # SessionStart has no guaranteed turn_id. Wait for a turn-scoped
+                # event instead of reissuing the previous turn's command.
+                state.pop("context_turn_id", None)
+                return _event_context(event, _author_context(state, env, None))
+            if event in {"UserPromptSubmit", "PreToolUse"}:
+                turn_id = _identity(payload.get("turn_id"), "turn_id")
+                turn = _bind_turn(state, turn_id)
+                if event == "PreToolUse":
+                    state["tool_turn_id"] = turn_id
+                    if state.get("context_turn_id") == turn_id or turn["status"] == "skipped":
+                        return {}
+                state["context_turn_id"] = turn_id
+                if event == "UserPromptSubmit" and _is_acknowledgement_prompt(payload.get("prompt")) and turn["status"] == "open":
+                    turn.update(status="skipped", skip="acknowledgement")
+                    return {}
+                return _event_context(event, _author_context(state, env, turn_id))
+            pending = sorted((turn for turn in state["turns"].values() if turn["status"] == "staged"),
+                             key=lambda turn: datetime.fromisoformat(turn["submitted_at"]))
+            for pending_turn in pending:
+                _commit(state, pending_turn)
+            if event == "SessionEnd":
+                return {}
+            turn_id = _identity(payload.get("turn_id") or state.get("last_turn_id"), "turn_id")
+            turn = state["turns"].get(_token(turn_id))
+            if not isinstance(turn, dict):
+                raise WorklogError("Stop has no initialized turn; no entry was written")
+            if turn.get("status") in {"committed", "skipped", "missing"}:
+                return {}
+            turn["status"] = "missing"
+            return {"systemMessage": "Codex Worklog: structured author submission missing; diary entry skipped. No facts were inferred from the final answer."}
+    except (WorklogError, OSError, ValueError, TypeError) as error:
+        message = str(error) if isinstance(error, WorklogError) else "storage operation failed; staged work was retained"
+        return {"systemMessage": f"Codex Worklog: {message}."}
 
 
 def main() -> int:
     arguments = sys.argv[1:]
-    if arguments == ["append"]:
-        return _append_main()
-    if arguments:
-        print("Codex Worklog: unknown command.", file=sys.stderr)
-        return 2
-    return _hook_main()
+    is_submit = bool(arguments)
+    try:
+        if arguments:
+            parser = argparse.ArgumentParser(description=__doc__)
+            parser.add_argument("command", choices=["submit"])
+            parser.add_argument("--data", required=True)
+            parser.add_argument("--session", required=True)
+            parser.add_argument("--turn", required=True)
+            args = parser.parse_args(arguments)
+        raw = sys.stdin.buffer.read(MAX_APPEND_INPUT_BYTES + 1 if is_submit else MAX_STATE_BYTES + 1)
+        if len(raw) > (MAX_APPEND_INPUT_BYTES if is_submit else MAX_STATE_BYTES):
+            raise WorklogError("input exceeds size limit")
+        payload = _json_object(raw)
+        if is_submit:
+            response = submit_entry(payload, args.session, args.turn,
+                                    {**os.environ, "PLUGIN_DATA": args.data})
+        else:
+            response = handle_event(payload)
+    except (WorklogError, OSError, ValueError, TypeError) as error:
+        message = str(error) if isinstance(error, WorklogError) else "storage operation failed"
+        if is_submit:
+            print(f"Codex Worklog: {message}.", file=sys.stderr)
+            return 2
+        response = {"systemMessage": f"Codex Worklog: {message}."}
+    except Exception as error:  # noqa: BLE001 - never expose input or a traceback.
+        response = {"systemMessage": f"Codex Worklog: internal {type(error).__name__}; no content generated."}
+        if is_submit:
+            print(response["systemMessage"], file=sys.stderr)
+            return 2
+    print(json.dumps(response, ensure_ascii=False, separators=(",", ":")))
+    return 0
 
 
 if __name__ == "__main__":

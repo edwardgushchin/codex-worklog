@@ -27,10 +27,14 @@ Codex Worklog follows [Semantic Versioning](https://semver.org/). Tags use the f
 
 6. Validate the plugin with the current Codex `plugin-creator` validator.
 7. Register a temporary local marketplace, install the plugin, trust the reviewed hooks, and run a smoke task in a temporary directory.
-8. Confirm startup, helper append and idempotency, state-change filtering,
-   structured transitions, system-language fallback, resume prefix preservation,
-   compaction context, quiet session close, advisory mode, disabled mode, and
-   uninstall behavior.
+8. Confirm exact author-command delivery and a diary commit before `submit`
+   returns `recorded: true` and `staged: false`, even without `Stop` or
+   `SessionEnd`. Check nonzero storage failures with retained staging, recovery
+   through command and hook retries, retries across midnight, concurrent daily
+   appends, explicit skips, missing-payload warnings, evidence preservation, language priority, resume
+   prefix preservation, compaction context, quiet session close, disabled mode,
+   and uninstall behavior. Inspect an actual model-authored work block; a schema
+   test alone does not establish semantic quality.
 
 ## Publish
 
