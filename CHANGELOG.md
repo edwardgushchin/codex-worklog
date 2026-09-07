@@ -27,6 +27,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Preserve public evidence paths beneath canonical workspace ancestors such as
+  macOS `/private/var`, while still redacting project-relative private paths.
+  Use canonical temporary test roots for macOS aliases and Windows short names.
 - Keep exact redaction placeholders stable during staged-content revalidation.
   Enforce text limits after sanitization before staging, preserving any earlier
   prepared submission and avoiding a payload that cannot be committed.

@@ -493,8 +493,6 @@ def _private_path(value: str) -> bool:
 
 def _local_reference(value: str, workspace: Path) -> str | None:
     value = unquote(value)
-    if _private_path(value):
-        return None
     suffix = ""
     match = re.fullmatch(r"(.+?):(\d+)(?::\d+)?", value)
     if match and not re.fullmatch(r"[A-Za-z]:", match.group(1)):
@@ -512,6 +510,10 @@ def _local_reference(value: str, workspace: Path) -> str | None:
         except ValueError:
             return None
     if not candidate.parts or str(candidate) == ".":
+        return None
+    # Protect project-relative private paths, not OS/workspace ancestors such
+    # as macOS /private/var. The workspace is already canonical and host-bound.
+    if _private_path(candidate.as_posix()):
         return None
     current = workspace
     for part in candidate.parts:
@@ -580,11 +582,11 @@ def _text(value: object, workspace: Path, label: str, limit: int = MAX_ITEM_CHAR
         body = match.group(1)
         if body.startswith(("/", "~/", "\\\\")) or PureWindowsPath(body).drive:
             body = _local_reference(body, workspace) or "[private or external path]"
-        elif _private_path(body):
-            body = "[private path]"
         else:
             body = URL.sub(lambda m: _remote_reference(m.group(0)) or "[private link]", body)
             body = ABSOLUTE.sub(lambda m: _local_reference(m.group(0), workspace) or "[external path]", body)
+            if _private_path(body):
+                body = "[private path]"
         return hold(f"`{body}`")
 
     value = re.sub(r"`([^`\n]+)`", code, value)

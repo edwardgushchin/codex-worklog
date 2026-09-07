@@ -30,7 +30,7 @@ SPEC.loader.exec_module(worklog)
 class StorageSecurityTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         self.workspace = self.root / "workspace"
         self.workspace.mkdir()
         self.plugin_data = self.root / "plugin-data"

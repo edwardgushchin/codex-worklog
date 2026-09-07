@@ -30,7 +30,7 @@ class WorklogHookTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         self.workspace = self.root / "workspace"
         self.workspace.mkdir()
         self.plugin_data = self.root / "plugin-data"
@@ -661,6 +661,25 @@ class WorklogHookTests(unittest.TestCase):
         self.assertNotIn(str(self.workspace), rendered)
         self.assertNotIn("[digest]", rendered)
         self.assertNotIn("[local path]", rendered)
+
+    def test_private_named_workspace_ancestor_does_not_hide_public_evidence(self) -> None:
+        self.workspace = self.root / "private" / "public-project"
+        self.workspace.mkdir(parents=True)
+        self.begin()
+        document = self.document()
+        public = self.workspace / "src" / "cache.py"
+        secret = self.workspace / "private" / "config.json"
+        document["entries"][0]["checks"] = [
+            f"Inspected {public}", f"Inspected `{public}`",
+            f"Ran `python3 {public}`", f"[Source](<{public}>)",
+            f"Excluded `{secret}` and [closed](<{secret}>).",
+        ]
+        self.assertTrue(self.submit(document)["recorded"])
+        rendered = self.rendered()
+        self.assertIn("`python3 src/cache.py`", rendered)
+        self.assertIn("[Source](<../../../src/cache.py>)", rendered)
+        self.assertNotIn("config.json", rendered)
+        self.assertNotIn(str(self.workspace), rendered)
 
     def test_hooks_do_not_read_transcripts_preserve_raw_text_or_run_git(self) -> None:
         transcript = self.root / "private-transcript.jsonl"
