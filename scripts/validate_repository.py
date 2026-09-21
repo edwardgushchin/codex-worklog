@@ -71,8 +71,12 @@ REQUIRED_FILES = {
     "plugins/codex-worklog/assets/logo.svg",
     "plugins/codex-worklog/hooks/hooks.json",
     "plugins/codex-worklog/scripts/worklog.py",
+    "plugins/codex-worklog/scripts/hook_launcher.py",
     "plugins/codex-worklog/skills/worklog/SKILL.md",
     "scripts/validate_repository.py",
+    "scripts/build_hook_commands.py",
+    "scripts/update_plugin.py",
+    "tests/test_hook_launcher.py",
     "tests/test_storage_security.py",
     "tests/test_validate_repository.py",
     "tests/test_worklog.py",
@@ -230,6 +234,12 @@ def validate_marketplace(errors: list[str]) -> None:
 
 
 def validate_hooks(errors: list[str]) -> None:
+    try:
+        from build_hook_commands import commands as hook_commands, command_matches
+        unix_command, windows_command = hook_commands(PLUGIN)
+    except (ImportError, OSError, ValueError, SyntaxError) as error:
+        errors.append(f"hook launcher source is unavailable or invalid: {type(error).__name__}")
+        return
     hooks_document = load_object(HOOKS, errors)
     if not _nonempty_string(hooks_document.get("description")):
         errors.append("hooks description must be a non-empty string")
@@ -270,16 +280,11 @@ def validate_hooks(errors: list[str]) -> None:
                     continue
                 if handler.get("type") != "command":
                     errors.append(f"{event_name} must use a command hook")
-                if (
-                    handler.get("command")
-                    != 'python3 -B "$PLUGIN_ROOT/scripts/worklog.py"'
-                ):
+                if not command_matches(handler.get("command"), unix_command):
                     errors.append(
                         f"{event_name} Unix command is not the reviewed runtime command"
                     )
-                if handler.get("commandWindows") != (
-                    'py -3 -B "%PLUGIN_ROOT%\\scripts\\worklog.py"'
-                ):
+                if not command_matches(handler.get("commandWindows"), windows_command):
                     errors.append(
                         f"{event_name} Windows command is not the reviewed runtime command"
                     )

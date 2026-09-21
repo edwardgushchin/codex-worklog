@@ -4,43 +4,6 @@ This document records revision-specific acceptance evidence. Earlier reports
 are retained as history; their test counts, installations, and release decisions
 do not establish acceptance of the current source.
 
-## 0.3.0 release candidate — 2026-09-08
-
-The release candidate includes the model-authored daily format, immediate
-submission commits, automatic-turn binding, and stable redaction placeholders.
-It preserves old diary files and uses separate versioned session state; it does
-not convert historical prose or claim a complete audit ledger.
-
-Three new regression tests first reproduced placeholder mutation, oversized
-normalized fields reaching staging, and failure at the exact normalized limit.
-The shared text sanitizer now preserves its exact placeholders and validates
-the final field size before staging. A rejected replacement leaves previous
-prepared work intact; valid content at the limit is not truncated. All 86 tests
-passed locally on Python 3.14.7. Compilation, the repository contract and plugin
-validation passed. Cross-platform results must be checked on the release PR's
-current commit; older green runs do not establish candidate acceptance.
-
-The first candidate CI passed Linux and CodeQL but exposed noncanonical test
-roots on macOS/Windows, plus a runtime evidence bug beneath `/private/var`.
-Fixtures now resolve their temporary root, and the sanitizer checks private
-paths relative to the host-bound workspace. A regression covers public paths,
-inline commands, and links below a private-named ancestor, while still hiding
-private files inside the project. Storage symlink protections were not relaxed.
-
-Before the portability correction, a real temporary Codex marketplace install
-of 0.3.0 passed all 70 runtime/security tests; the normal user configuration was
-hash-identical afterward. That isolated install did not replace the user's plugin.
-
-The earlier automatic-turn delivery gap was checked again before preparation:
-the reported live task had current `PreToolUse` bindings and seven new committed
-entries with matching daily-file markers. Its latest inspected block retained
-all six sections and distinguished read-only test inspection from test execution.
-This confirms those observed saves, not completeness of every historical turn.
-
-Release preparation uses an isolated checkout. The maintainer's primary dirty
-worktree and installed plugin are not replaced by preparing a candidate.
-Publication and clean Git-tag installation remain separate release steps.
-
 ## Automatic goal turn binding — 2026-09-07
 
 In the reported desktop goal, automatic continuations did not initialize a new

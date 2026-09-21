@@ -6,10 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-## [0.3.0] - 2026-09-08
-
 ### Changed
 
+- Record bounded, local launch diagnostics under `PLUGIN_DATA/diagnostics-v1`,
+  including runtime identity changes, missing files, and startup failures.
+  Record observer PIDs separately from unknown change initiators; never log
+  prompts, tool data, exception messages, or absolute paths.
+- Add an explicit audited update helper with operation IDs, before/after cache
+  versions, and start/completion/failure records. Native UI and unrelated
+  processes remain outside this helper's attribution boundary.
 - Replace final-answer and commentary classification with active-model authored
   work blocks containing context, chronology, changes, decisions, checks, and
   next steps. Sections retain bounded lists instead of flattened sentences.
@@ -27,9 +32,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- Preserve public evidence paths beneath canonical workspace ancestors such as
-  macOS `/private/var`, while still redacting project-relative private paths.
-  Use canonical temporary test roots for macOS aliases and Windows short names.
+- Repeat the current author command and a short schema on `PreToolUse` until
+  the turn is recorded or explicitly skipped, instead of treating initial
+  context delivery as sufficient. Preserve staged data, exact retries, and
+  non-blocking hooks without adding Stop continuations or synthetic entries.
+- Handle a task's workspace change on a new host turn without losing its
+  author command. Preserve old diary bytes and staged destinations; defer
+  retries outside the current workspace until the task returns there. Keep
+  direct submissions and existing turns from changing their workspace binding.
+- Promote moved sessions to state version 3 so older runtimes reject them
+  instead of retrying old prepared blocks in the new workspace.
+- Embed the hook-only launcher and reviewed storage guards in each saved hook
+  command, so losing the complete plugin cache cannot yield exit code 2, block
+  tools, or request Stop continuations. Direct `submit` retains nonzero failures.
+- Exercise missing and replaced packages, startup failures, concurrent audit
+  writes, path protection, and a real isolated native CLI reinstall.
 - Keep exact redaction placeholders stable during staged-content revalidation.
   Enforce text limits after sanitization before staging, preserving any earlier
   prepared submission and avoiding a payload that cannot be committed.
@@ -173,7 +190,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Reject non-portable directory overrides, invalid hook paths, corrupt, oversized, or cross-workspace state, and sanitize control characters in model-visible metadata.
 - Reduced GitHub workflow token permissions and disabled checkout credential persistence.
 
-[Unreleased]: https://github.com/edwardgushchin/codex-worklog/compare/v0.3.0...HEAD
-[0.3.0]: https://github.com/edwardgushchin/codex-worklog/compare/v0.2.0...v0.3.0
+[Unreleased]: https://github.com/edwardgushchin/codex-worklog/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/edwardgushchin/codex-worklog/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/edwardgushchin/codex-worklog/releases/tag/v0.1.0

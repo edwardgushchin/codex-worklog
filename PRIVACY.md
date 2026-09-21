@@ -1,6 +1,6 @@
 # Privacy Policy
 
-Effective date: 2026-09-05
+Effective date: 2026-09-08
 
 Codex Worklog is local, open-source software. Its runtime does not operate a
 hosted service, send telemetry, make network requests, use cookies, or maintain
@@ -12,7 +12,7 @@ within the existing task; the plugin starts no separate model or API request.
 The runtime processes lifecycle metadata supplied by Codex and a structured
 summary submitted by the active model:
 
-- the original working directory, configured diary root, and validated private
+- host-bound working directories per turn, configured diary root, and validated private
   state location;
 - session and turn identifiers for binding submissions and deduplicating writes;
 - submission timestamps, language hints, and lifecycle state;
@@ -36,15 +36,32 @@ records as untrusted evidence, not instructions or authorization.
 ## Storage
 
 - Daily Markdown files live below the configured relative directory in the
-  original session `cwd`, by default `.dev-diary/YYYY/MM/YYYY-MM-DD.md`.
+  turn's host-bound `cwd`, by default `.dev-diary/YYYY/MM/YYYY-MM-DD.md`.
 - Versioned private state lives in Codex-provided `PLUGIN_DATA/sessions-v2/`.
   `submit` durably stages validated, sanitized blocks before committing them to
   the diary. A crash or storage failure can leave prepared blocks there for a
   command or lifecycle retry. Raw submission text is not retained separately.
+  A workspace move preserves old turn destinations; retries there wait until
+  the task returns, without copying prepared content into the new project's diary.
 - New directories and files use `0700` and `0600` where POSIX permissions apply.
   Existing directory and diary permissions are preserved.
 - Prior diaries and legacy private state are preserved; this revision does not
   rewrite or merge historical records.
+- Launch diagnostics live in `PLUGIN_DATA/diagnostics-v1/`, outside the
+  replaceable plugin cache. State transitions record UTC time, a hash of the
+  runtime root, cache version when recognizable, runtime SHA-256 and file
+  identity, failure class, and observer PID/parent PID. They contain no prompts,
+  transcripts, tool data, absolute paths, or exception messages. The observer is
+  not the process that removed a file: external change initiators are `unknown`.
+- Repeated identical observations are deduplicated. Daily JSONL files are
+  append-only, capped at 2 MiB each, with a small last-observation state per
+  runtime root. Retention is user-controlled; logs are not automatically erased.
+  Storage failures produce a warning, never a blocking hook or false submit
+  success. `off` suppresses launch diagnostics as well as diary/state writes.
+- The manually invoked `scripts/update_plugin.py` also records its operation
+  ID, before/after cache version names (up to 128), refresh flag and exit status.
+  Only its own operations are attributed to that helper; CLI output is not
+  persisted. It refuses to start an update if the initial audit cannot be saved.
 
 ## Sharing and retention
 
