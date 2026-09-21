@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This repository packages `codex-worklog`, a local Codex plugin that asks the active model to author structured work blocks and uses a runtime helper to validate and commit them to an append-only daily diary in the original session working directory. Lifecycle hooks supply authoring context and retry prepared work. A focused skill exposes that history only for inspection and context recovery.
+This repository packages `codex-worklog`, a local Codex plugin that asks the active model to author structured work blocks and uses a runtime helper to validate and commit them to an append-only daily diary in each turn's host-bound working directory. Lifecycle hooks supply authoring context and retry prepared work. A focused skill exposes that history only for inspection and context recovery.
 
 ## Structure
 
@@ -38,10 +38,14 @@ This repository packages `codex-worklog`, a local Codex plugin that asks the act
   boundary and must never invent a summary. Missing payloads produce a warning
   and no entry, never a regex-generated substitute or a continuation loop.
 - Bind automatic turns through `PreToolUse`, not only `UserPromptSubmit`.
+  Repeat a short exact-command reminder while the turn is unrecorded; stop
+  reminders after commit or explicit skip, without blocking or continuing turns.
   Never reissue a stale turn command after compaction or weaken exact-retry
   deduplication to accept independent work.
 - Derive every write target from validated session state. Preserve existing
   permissions and diary bytes; serialize marker checks and atomic commits.
+- Only a new host turn may change the workspace binding. Preserve old turn
+  destinations; retry staged blocks only while their workspace is current.
 - Keep the exported `worklog` skill read-only and limited to requested history inspection or context recovery; it must never perform routine appends.
 - Treat worklogs as historical notes and verify mutable state before acting on them.
 - Do not modify user Codex configuration, install the plugin, publish GitHub state, or create releases unless the current request authorizes it.

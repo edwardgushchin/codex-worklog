@@ -35,7 +35,7 @@ unknown. Timestamps are evidence, not invented decoration.
 - Acknowledgements, repeated history, and already-recorded work are skipped.
   Missing payloads produce a warning, never a low-quality fallback or a
   maintenance continuation loop.
-- Sessions share one append-only daily file beneath their original workspace.
+- Sessions share one append-only daily file beneath each turn's host-bound workspace.
   Concurrent commits are locked and atomic, with markers for retry safety.
 - Multi-item sections retain useful detail within explicit size limits.
   Failures and overturned decisions remain understandable in chronological

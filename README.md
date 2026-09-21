@@ -36,7 +36,7 @@
 
 ## About
 
-Codex Worklog automatically keeps a local semantic worklog for every Codex task, appending outcomes to a Markdown file in the directory where the task starts:
+Codex Worklog automatically keeps a local semantic worklog for every Codex task, appending outcomes to a Markdown file in the working directory bound to the current turn:
 
 ```text
 <session cwd>/.dev-diary/YYYY/MM/YYYY-MM-DD.md
@@ -63,16 +63,21 @@ The plugin combines a submission helper, five lifecycle hooks, and one focused h
 | --- | --- |
 | `SessionStart` | Establishes private state bound to the original session `cwd`; no empty diary is created. |
 | `UserPromptSubmit` | Supplies self-contained authoring instructions and the exact installed `submit` command for this turn. |
-| `PreToolUse` | Binds automatic continuation turns without a user prompt; refreshes the command once per turn and after compaction. |
+| `PreToolUse` | Binds automatic continuation turns; repeats the current command and a short schema while the turn is unrecorded, and refreshes full context after compaction. |
 | `submit` | Validates and durably stages blocks, then atomically commits them before confirming that they are recorded. |
 | `Stop` | Retries prepared blocks that were not committed; no new prose is generated. |
 | `SessionEnd` | Retries any remaining prepared work; never generates additional prose. |
 
 Before finishing, the model sends a JSON envelope on stdin to the supplied
-`worklog.py submit --data … --session … --turn …` command from the original
-working directory. It submits up to eight independent work blocks, or an
+`worklog.py submit --data … --session … --turn …` command from the working
+directory specified in that turn's instructions. It submits up to eight independent work blocks, or an
 explicit skip reason. The runtime accepts no caller-selected diary path or
 marker. The full schema and limits are in [Architecture](docs/ARCHITECTURE.md).
+
+If Codex changes the task's working directory between turns, the next prompt or
+local tool binds new work to the new project. Existing diary entries stay put;
+prepared blocks from the previous project remain pending until the task returns
+there. A submission cannot select or change its own destination.
 
 For material work, success includes `recorded: true` and `staged: false` only
 after the daily file is committed. A storage failure exits nonzero without
@@ -171,12 +176,34 @@ codex plugin add codex-worklog@codex-worklog
 
 Codex installs a cached copy. After local changes, reinstall the plugin and start a new task so the updated hook definitions are loaded.
 
+Native installation can replace the **whole plugin cache**, including older
+versions referenced by open tasks. Saved hooks in this revision embed their
+failure boundary and safely warn if the package disappears. Legacy direct-script
+hooks cannot be retroactively fixed by editing a new package: disable the plugin
+in affected tasks before updating, then start a new task and review the new hooks.
+
 ### Update or remove
 
 ```bash
 codex plugin marketplace upgrade codex-worklog
 codex plugin add codex-worklog@codex-worklog
 ```
+
+For an attributed update log, run from a reviewed local clone instead:
+
+```bash
+python3 scripts/update_plugin.py --refresh
+```
+
+Omit `--refresh` to reinstall an already refreshed/local source. This explicit
+command runs native Codex installation, so it may enable the installed plugin;
+do not run it just to inspect a deliberately disabled installation.
+It records start/completion/failure, operation ID, observer PID and before/after
+cache versions in `PLUGIN_DATA/diagnostics-v1/events-YYYY-MM-DD.jsonl`. Launchers
+also record runtime changes and failures there without raw task content.
+For operations outside this helper the change initiator is **unknown**, not the
+PID of the observer. Identifying an arbitrary deleting process requires separate
+OS auditing; the plugin does not install an OS watcher or audit service.
 
 ```bash
 codex plugin remove codex-worklog@codex-worklog

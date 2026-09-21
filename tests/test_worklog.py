@@ -300,7 +300,9 @@ class WorklogHookTests(unittest.TestCase):
             context = response["hookSpecificOutput"]["additionalContext"]
             self.assertIn(f"--turn {turn}", context)
             state_before = self.states()[0].read_bytes()
-            self.assertEqual(self.handle("PreToolUse", turn_id=turn, tool_name="Bash"), {})
+            reminder = self.handle("PreToolUse", turn_id=turn, tool_name="Bash")
+            self.assertIn(f"--turn {turn}", reminder["hookSpecificOutput"]["additionalContext"])
+            self.assertLess(len(reminder["hookSpecificOutput"]["additionalContext"]), len(context))
             self.assertEqual(self.states()[0].read_bytes(), state_before)
             document = self.document()
             document["entries"][0]["title"] = f"Completed independent automatic work block {index}"
@@ -315,6 +317,77 @@ class WorklogHookTests(unittest.TestCase):
             previous = raw
         self.assertEqual(previous.count(b"<!-- codex-worklog-entry:"), 4)
         self.assertNotIn(b"raw-tool-input-canary", self.states()[0].read_bytes())
+
+    def test_pretool_reminder_repeats_until_committed_without_writing_payloads(self) -> None:
+        guide = self.begin()["hookSpecificOutput"]["additionalContext"]
+        command = guide.split("Command (send JSON on stdin; use a quoted heredoc on POSIX):\n")[1].splitlines()[0]
+        previous = None
+        for tool in ("Bash", "apply_patch", "mcp__example__read") * 4:
+            response = self.handle("PreToolUse", turn_id="turn-one", tool_name=tool,
+                                   tool_input={"command": "DO_NOT_KEEP_TOOL_INPUT"})
+            self.assertEqual(set(response), {"hookSpecificOutput"})
+            self.assertEqual(set(response["hookSpecificOutput"]), {"hookEventName", "additionalContext"})
+            context = response["hookSpecificOutput"]["additionalContext"]
+            self.assertIn(command, context)
+            self.assertIn("not recorded", context)
+            self.assertIn("recorded:true", context)
+            self.assertIn("staged:false", context)
+            for field in worklog.REQUIRED_KEYS:
+                self.assertIn(f'"{field}"', context)
+            self.assertLess(len(context), len(guide) // 2)
+            self.assertNotIn(worklog.AUTHOR_GUIDE, context)
+            current = self.states()[0].read_bytes()
+            self.assertNotIn(b"DO_NOT_KEEP_TOOL_INPUT", current)
+            if previous is not None:
+                self.assertEqual(current, previous)
+            previous = current
+        self.assertEqual(self.diaries(), [])
+        result = self.submit()
+        recorded = self.diaries()[0].read_bytes()
+        for _ in range(3):
+            self.assertEqual(self.handle("PreToolUse", turn_id="turn-one"), {})
+            self.assertEqual(self.stop(), {})
+        self.assertEqual(self.submit()["entry_ids"], result["entry_ids"])
+        self.assertEqual(self.diaries()[0].read_bytes(), recorded)
+        self.assertEqual(recorded.count(b"<!-- codex-worklog-entry:"), 1)
+
+    def test_pretool_reminder_preserves_staged_content_for_retry(self) -> None:
+        self.begin()
+        self.stage()
+        prepared = json.loads(self.states()[0].read_bytes())["turns"]
+        for _ in range(3):
+            response = self.handle("PreToolUse", turn_id="turn-one")
+            context = response["hookSpecificOutput"]["additionalContext"]
+            self.assertIn("prepared", context)
+            self.assertIn("--turn turn-one", context)
+            self.assertNotIn('{"skip":"no_material_work"}', context)
+            self.assertEqual(json.loads(self.states()[0].read_bytes())["turns"], prepared)
+        self.assertEqual(self.diaries(), [])
+        self.assertEqual(self.stop(), {})
+        self.assertEqual(self.handle("PreToolUse", turn_id="turn-one"), {})
+        self.assertEqual(self.rendered().count("<!-- codex-worklog-entry:"), 1)
+
+    def test_pretool_reminder_recovers_missing_turn_without_stop_continuation(self) -> None:
+        self.begin()
+        self.assertEqual(set(self.stop()), {"systemMessage"})
+        self.assertEqual(self.stop(), {})
+        response = self.handle("PreToolUse", turn_id="turn-one")
+        self.assertIn("--turn turn-one", response["hookSpecificOutput"]["additionalContext"])
+        self.assertEqual(self.stop(), {})
+        self.assertEqual(self.diaries(), [])
+        self.assertTrue(self.submit()["recorded"])
+        self.assertEqual(self.stop(), {})
+
+    def test_pretool_reminder_stays_silent_after_explicit_skip_or_acknowledgement(self) -> None:
+        self.begin()
+        self.submit({"skip": "no_material_work"})
+        for source in (None, "compact", "resume"):
+            if source:
+                self.handle("SessionStart", source=source)
+            self.assertEqual(self.handle("PreToolUse", turn_id="turn-one"), {})
+        self.handle("UserPromptSubmit", turn_id="thanks-turn", prompt="Спасибо!")
+        self.assertEqual(self.handle("PreToolUse", turn_id="thanks-turn"), {})
+        self.assertEqual(self.diaries(), [])
 
     def test_pretool_context_refreshes_after_compact_without_reopening_recorded_turn(self) -> None:
         self.begin()
@@ -354,6 +427,157 @@ class WorklogHookTests(unittest.TestCase):
         response = self.handle("PreToolUse", turn_id="goal-turn", tool_name="Bash")
         self.assertIn("--turn goal-turn", response["hookSpecificOutput"]["additionalContext"])
         self.assertTrue(self.submit(turn="goal-turn")["recorded"])
+
+    def test_workspace_move_preserves_legacy_entries_and_return(self) -> None:
+        self.begin()
+        first = self.submit()
+        self.handle("UserPromptSubmit", turn_id="turn-two")
+        self.submit(turn="turn-two")
+        old_workspace = self.workspace
+        old_diary = self.diaries()[0]
+        old_bytes = old_diary.read_bytes()
+        # Existing installations have v2 states with no per-turn workspace.
+        state_path = self.states()[0]
+        legacy = json.loads(state_path.read_bytes())
+        self.assertEqual(legacy["version"], 2)
+        for turn in legacy["turns"].values():
+            turn.pop("workspace", None)
+        state_path.write_bytes(worklog._json_bytes(legacy))
+
+        self.workspace = self.root / "moved-project"
+        self.workspace.mkdir()
+        start = self.handle("SessionStart", source="resume")
+        self.assertIn("hookSpecificOutput", start)
+        self.assertNotIn("--turn", start["hookSpecificOutput"]["additionalContext"])
+        # Resume alone cannot authorize a write from a different workspace.
+        with self.assertRaises(worklog.WorklogError):
+            self.submit()
+        response = self.handle("UserPromptSubmit", turn_id="moved-turn")
+        guide = response["hookSpecificOutput"]["additionalContext"]
+        self.assertIn(f'Run from cwd: {json.dumps(str(self.workspace))}', guide)
+        self.assertIn("--turn moved-turn", guide)
+        self.environment["CODEX_THREAD_ID"] = "session-one"
+        self.handle("PreToolUse", turn_id="moved-turn", tool_name="Bash")
+        # Even an exact retry or the stale-command adapter cannot cross projects.
+        with self.assertRaisesRegex(worklog.WorklogError, "workspace"):
+            self.submit()
+        document = self.document()
+        document["entries"][0]["supersedes"] = first["entry_ids"]
+        with self.assertRaisesRegex(worklog.WorklogError, "unknown entry"):
+            self.submit(document, turn="moved-turn")
+        document["entries"][0]["supersedes"] = []
+        moved = self.submit(document, turn="moved-turn")
+        self.assertTrue(moved["recorded"])
+        self.assertFalse(moved["staged"])
+        self.assertEqual(self.stop(turn="moved-turn"), {})
+        new_diary = self.diaries()[0]
+        new_bytes = new_diary.read_bytes()
+        self.assertEqual(new_bytes.count(b"<!-- codex-worklog-entry:"), 1)
+        self.assertEqual(old_diary.read_bytes(), old_bytes)
+        state = json.loads(state_path.read_bytes())
+        self.assertEqual(state["version"], 3)  # Old runtimes must fail closed.
+        self.assertEqual(state["turns"][worklog._token("turn-one")]["workspace"], str(old_workspace))
+
+        self.workspace = old_workspace
+        self.handle("UserPromptSubmit", turn_id="return-turn")
+        self.assertTrue(self.submit(turn="return-turn")["recorded"])
+        self.assertEqual(old_diary.read_bytes().count(b"<!-- codex-worklog-entry:"), 3)
+        self.assertTrue(old_diary.read_bytes().startswith(old_bytes))
+        self.assertEqual(new_diary.read_bytes(), new_bytes)
+
+    def test_workspace_move_retains_staging_until_host_returns(self) -> None:
+        self.begin()
+        self.stage()
+        old_workspace = self.workspace
+        staged = json.loads(self.states()[0].read_bytes())["turns"][worklog._token("turn-one")]
+        self.workspace = self.root / "automatic-project"
+        self.workspace.mkdir()
+        response = self.handle("PreToolUse", turn_id="automatic-turn", tool_name="Bash")
+        self.assertIn("--turn automatic-turn", response["hookSpecificOutput"]["additionalContext"])
+        self.assertTrue(self.submit(turn="automatic-turn")["recorded"])
+        unavailable = self.root / "offline-project"
+        old_workspace.rename(unavailable)
+        for event in ("Stop", "SessionEnd"):
+            result = self.handle(event, turn_id="automatic-turn")
+            self.assertIn("another workspace", result.get("systemMessage", ""))
+            self.assertNotIn("hookSpecificOutput", result)
+        retained = json.loads(self.states()[0].read_bytes())["turns"][worklog._token("turn-one")]
+        self.assertEqual(retained["status"], "staged")
+        self.assertEqual(retained["digest"], staged["digest"])
+        self.assertEqual(retained["submission"], staged["submission"])
+        self.assertFalse((old_workspace / ".dev-diary").exists())
+        new_diary = self.diaries()[0]
+        new_bytes = new_diary.read_bytes()
+
+        unavailable.rename(old_workspace)
+        self.workspace = old_workspace
+        self.handle("UserPromptSubmit", turn_id="return-turn")
+        self.submit({"skip": "no_material_work"}, turn="return-turn")
+        self.assertEqual(self.stop(turn="return-turn"), {})
+        self.assertEqual(self.handle("SessionEnd"), {})
+        self.assertIn("turn:turn-one", self.rendered())
+        self.assertEqual(self.rendered().count("<!-- codex-worklog-entry:"), 1)
+        self.assertEqual(new_diary.read_bytes(), new_bytes)
+
+    def test_workspace_move_cannot_rebind_an_existing_turn(self) -> None:
+        self.begin()
+        original = self.states()[0].read_bytes()
+        self.workspace = self.root / "other-project"
+        self.workspace.mkdir()
+        for event in ("UserPromptSubmit", "PreToolUse", "Stop", "SessionEnd"):
+            response = self.handle(event, turn_id="turn-one")
+            self.assertIn("workspace", response.get("systemMessage", ""))
+            self.assertNotIn("hookSpecificOutput", response)
+            self.assertEqual(self.states()[0].read_bytes(), original)
+        with self.assertRaises(worklog.WorklogError):
+            self.submit()
+        self.assertEqual(list(self.workspace.iterdir()), [])
+
+    def test_workspace_move_between_staging_and_commit_retains_prepared_data(self) -> None:
+        self.begin()
+        other = self.root / "next-project"
+        other.mkdir()
+        stage = worklog._stage_entry
+
+        def move_after_stage(*args: Any, **kwargs: Any) -> dict:
+            result = stage(*args, **kwargs)
+            response = self.handle("PreToolUse", turn_id="next-turn", cwd=str(other))
+            self.assertIn("hookSpecificOutput", response)
+            return result
+
+        with mock.patch.object(worklog, "_stage_entry", side_effect=move_after_stage):
+            with self.assertRaisesRegex(worklog.WorklogError, "workspace"):
+                self.submit()
+        state = json.loads(self.states()[0].read_bytes())
+        self.assertEqual(state["turns"][worklog._token("turn-one")]["status"], "staged")
+        self.assertFalse(self.diaries())
+        self.assertFalse((other / ".dev-diary").exists())
+
+    def test_workspace_move_rejects_corrupt_turn_bindings(self) -> None:
+        self.begin()
+        self.workspace = self.root / "moved-project"
+        self.workspace.mkdir()
+        self.handle("UserPromptSubmit", turn_id="moved-turn")
+        path = self.states()[0]
+        original = path.read_bytes()
+        for binding in (None, "../outside", {}, "missing"):
+            with self.subTest(binding=binding):
+                state = json.loads(original)
+                old = state["turns"][worklog._token("turn-one")]
+                if binding == "missing":
+                    old.pop("workspace")
+                else:
+                    old["workspace"] = binding
+                corrupt = worklog._json_bytes(state)
+                path.write_bytes(corrupt)
+                response = self.handle("PreToolUse", turn_id="moved-turn")
+                self.assertIn("workspace", response.get("systemMessage", ""))
+                self.assertNotIn("hookSpecificOutput", response)
+                with self.assertRaises(worklog.WorklogError):
+                    self.submit(turn="moved-turn")
+                self.assertEqual(path.read_bytes(), corrupt)
+                self.assertEqual(list(self.workspace.iterdir()), [])
+        path.write_bytes(original)
 
     def test_cli_first_automatic_tool_can_submit_using_an_old_command(self) -> None:
         self.begin()

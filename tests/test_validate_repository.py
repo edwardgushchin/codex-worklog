@@ -75,6 +75,33 @@ class RepositoryValidatorTests(unittest.TestCase):
             "required file is missing: tests/test_storage_security.py"
         )
 
+    def test_launcher_source_and_generated_commands_must_match(self) -> None:
+        launcher = self.root / 'plugins/codex-worklog/scripts/hook_launcher.py'
+        launcher.write_text(launcher.read_text() + '\n# Changed launcher\n')
+        self.assert_validation_error('Unix command is not the reviewed runtime command')
+
+    def test_launcher_builder_is_required_without_traceback(self) -> None:
+        (self.root / 'scripts/build_hook_commands.py').unlink()
+        self.assert_validation_error('required file is missing: scripts/build_hook_commands.py')
+
+    def test_launcher_validation_ignores_compression_but_not_source_or_wrapper(self) -> None:
+        import base64
+        import zlib
+        path = 'plugins/codex-worklog/hooks/hooks.json'
+        document = self.read_json(path)
+        for groups in document['hooks'].values():
+            handler = groups[0]['hooks'][0]
+            for field in ('command', 'commandWindows'):
+                parts = handler[field].split("'")
+                source = zlib.decompress(base64.b64decode(parts[1]))
+                parts[1] = base64.b64encode(zlib.compress(source, 6)).decode()
+                handler[field] = "'".join(parts)
+        self.write_json(path, document)
+        self.assertEqual(self.run_validator().returncode, 0)
+        handler['command'] += '; echo unwanted'
+        self.write_json(path, document)
+        self.assert_validation_error('Unix command is not the reviewed runtime command')
+
     def test_angle_links_support_spaces_parentheses_and_fragments(self) -> None:
         report = self.root / "examples/reports/Verified result (final).md"
         report.write_text("# Evidence\n", encoding="utf-8")

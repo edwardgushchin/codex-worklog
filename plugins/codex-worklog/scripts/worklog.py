@@ -228,7 +228,7 @@ class _Directory:
             # No FILE_SHARE_DELETE: an open ancestor cannot be renamed/replaced.
             handle = self.kernel.CreateFileW(str(current), 0x80, 3, None, 3, 0x02200000, None)
             if handle == ctypes.c_void_p(-1).value:
-                raise OSError("unable to anchor directory")
+                raise ctypes.WinError(ctypes.get_last_error())
             self.handles.append(handle)
             status = current.lstat()
             if _linked(status) or not stat.S_ISDIR(status.st_mode):
@@ -406,6 +406,9 @@ def _json_object(raw: bytes) -> dict[str, Any]:
 
 
 def _validate_turns(state: Mapping[str, Any]) -> None:
+    workspace = state.get("workspace")
+    if not isinstance(workspace, str) or str(_absolute(workspace, "stored workspace")) != workspace:
+        raise WorklogError("invalid stored workspace")
     turns = state["turns"]
     if len(turns) > 128:
         raise WorklogError("session has too many pending turns")
@@ -418,6 +421,11 @@ def _validate_turns(state: Mapping[str, Any]) -> None:
             "open", "staged", "committed", "skipped", "missing",
         }:
             raise WorklogError("invalid turn identity or status")
+        bound = turn.get("workspace", workspace if state["version"] == 2 else None)
+        if not isinstance(bound, str) or str(_absolute(bound, "stored turn workspace")) != bound:
+            raise WorklogError("invalid stored turn workspace")
+        if state["version"] == 2 and bound != workspace:
+            raise WorklogError("multiple workspaces require session state version 3")
         if status in {"staged", "committed"}:
             try:
                 timestamp = datetime.fromisoformat(turn["submitted_at"])
@@ -449,7 +457,7 @@ def _validate_turns(state: Mapping[str, Any]) -> None:
 @contextmanager
 def _session(
     session_id: str, workspace: Path, environment: Mapping[str, str],
-    now: datetime, create: bool = False,
+    now: datetime, create: bool = False, allow_workspace_change: bool = False,
 ) -> Iterator[dict[str, Any]]:
     session_id = _identity(session_id, "session_id")
     root = _worklog_directory_name(environment)
@@ -467,8 +475,8 @@ def _session(
             else:
                 state = _json_object(previous[0])
                 if (
-                    state.get("version") != 2 or state.get("session_id") != session_id
-                    or state.get("workspace") != str(workspace)
+                    state.get("version") not in {2, 3} or state.get("session_id") != session_id
+                    or (not allow_workspace_change and state.get("workspace") != str(workspace))
                     or not isinstance(state.get("turns"), dict)
                 ):
                     raise WorklogError("session state does not match this workspace, session, or diary root")
@@ -764,6 +772,8 @@ def _commit(state: dict[str, Any], turn: dict[str, Any]) -> bool:
     document = turn.get("submission")
     if not isinstance(document, dict):
         return False
+    if turn.get("workspace", state["workspace"]) != state["workspace"]:
+        raise WorklogError("prepared turn belongs to another workspace; return there to retry")
     workspace = _workspace(state["workspace"])
     # Revalidate private staging too; its directory is trusted, its JSON still isn't.
     document = _validate_document(document, workspace)
@@ -823,6 +833,8 @@ def _stage_entry(
         turn = state["turns"].get(_token(turn_id))
         if not isinstance(turn, dict) or turn.get("turn_id") != turn_id:
             raise WorklogError("turn was not initialized by UserPromptSubmit or PreToolUse")
+        if turn.get("workspace", state["workspace"]) != str(active_workspace):
+            raise WorklogError("submission turn belongs to a different workspace; use its host command")
         if turn.get("status") == "committed" and turn.get("digest") == digest:
             return {"staged": False, "already_recorded": True,
                     "entry_ids": turn["entry_ids"], "turn_id": turn_id}
@@ -836,6 +848,8 @@ def _stage_entry(
             turn = state["turns"].get(_token(turn_id))
             if not isinstance(turn, dict) or turn.get("turn_id") != turn_id:
                 raise WorklogError("host tool turn has no initialized state")
+            if turn.get("workspace", state["workspace"]) != str(active_workspace):
+                raise WorklogError("host tool turn belongs to a different workspace")
         if turn.get("status") == "committed":
             if turn.get("digest") != digest:
                 raise WorklogError("turn is already recorded; use a new turn and supersedes")
@@ -890,6 +904,8 @@ def submit_entry(
 
 AUTHOR_GUIDE = """Codex Worklog: you author meaningful work blocks from the current task context.
 Before the final answer, submit one JSON document using the exact command below.
+If that command is no longer visible, the next local tool call supplies it again
+while this turn is unrecorded. Do not reuse a previous turn's command.
 Use the latest command supplied for this turn. Automatic goal continuations are
 bound by PreToolUse, including when no new user message is sent. Never invent a
 turn ID or use supersedes merely because this is a later independent work block.
@@ -942,7 +958,8 @@ supersedes, never by replacing the same turn's submission.
 """
 
 
-def _author_context(state: Mapping[str, Any], environment: Mapping[str, str], turn_id: str | None) -> str:
+def _author_context(state: Mapping[str, Any], environment: Mapping[str, str],
+                    turn_id: str | None, *, reminder: bool = False) -> str:
     if not turn_id:
         skill = Path(__file__).resolve().parents[1] / "skills" / "worklog" / "SKILL.md"
         return ("Codex Worklog records model-authored work blocks. UserPromptSubmit or "
@@ -967,7 +984,20 @@ def _author_context(state: Mapping[str, Any], environment: Mapping[str, str], tu
                      "checks": ["<actual check, result and limits>"],
                      "next_steps": ["<remaining work>"], "artifacts": [], "supersedes": []}],
     }
-    return (AUTHOR_GUIDE + f"\nRun from cwd: {json.dumps(state['workspace'], ensure_ascii=False)}\n"
+    guide = AUTHOR_GUIDE
+    if reminder:
+        guide = ("Codex Worklog: this turn is not recorded. Before your final answer, "
+                 "use the exact current command and six-section schema below with "
+                 "model-authored facts from this task only. Protect secrets; do not "
+                 "edit diary/state files manually. For material work, require "
+                 "recorded:true and staged:false before claiming success.\n")
+        if state["turns"][_token(turn_id)]["status"] == "staged":
+            guide += ("A prepared submission is retained: retry the same payload after "
+                      "resolving the storage error, or let Stop retry. Do not replace "
+                      "prepared work with a new summary or a skip.\n")
+        else:
+            guide += ('If no material work occurred, submit {"skip":"no_material_work"}.\n')
+    return (guide + f"\nRun from cwd: {json.dumps(state['workspace'], ensure_ascii=False)}\n"
             f"Command (send JSON on stdin; use a quoted heredoc on POSIX):\n{quoted}\n"
             "Schema example (replace placeholders; 1..8 blocks, 1..32 items/section, "
             "4096 characters/item, 64 KiB/document):\n" + json.dumps(example, ensure_ascii=False))
@@ -977,8 +1007,22 @@ def _event_context(event: str, context: str) -> dict[str, Any]:
     return {"hookSpecificOutput": {"hookEventName": event, "additionalContext": context}}
 
 
-def _bind_turn(state: dict[str, Any], turn_id: str) -> dict[str, Any]:
+def _bind_turn(state: dict[str, Any], turn_id: str, workspace: Path) -> dict[str, Any]:
     key = _token(turn_id)
+    destination = str(workspace)
+    if key in state["turns"] and (
+        state["workspace"] != destination
+        or state["turns"][key].get("workspace", state["workspace"]) != destination
+    ):
+        raise WorklogError("turn belongs to a different workspace; start a new host turn")
+    if state["workspace"] != destination:
+        # Preserve every old destination, including staged work. Version 3 makes
+        # older runtimes reject this state instead of retrying it in the new cwd.
+        for old in state["turns"].values():
+            old.setdefault("workspace", state["workspace"])
+        state.update(version=3, workspace=destination)
+        state.pop("context_turn_id", None)
+        state.pop("tool_turn_id", None)
     if key not in state["turns"]:
         for old_key, old in list(state["turns"].items()):
             if len(state["turns"]) < 128:
@@ -987,7 +1031,7 @@ def _bind_turn(state: dict[str, Any], turn_id: str) -> dict[str, Any]:
                 del state["turns"][old_key]
         if len(state["turns"]) >= 128:
             raise WorklogError("too many pending turns; commit staged work first")
-        state["turns"][key] = {"turn_id": turn_id, "status": "open"}
+        state["turns"][key] = {"turn_id": turn_id, "status": "open", "workspace": destination}
     state["last_turn_id"] = turn_id
     return state["turns"][key]
 
@@ -1009,7 +1053,9 @@ def handle_event(payload: Mapping[str, Any], environment: Mapping[str, str] | No
         timestamp = _timestamp(now)
         workspace = _workspace(payload.get("cwd"))
         session_id = _identity(payload.get("session_id"), "session_id")
-        with _session(session_id, workspace, env, timestamp, create=event in {"SessionStart", "UserPromptSubmit", "PreToolUse"}) as state:
+        author_event = event in {"SessionStart", "UserPromptSubmit", "PreToolUse"}
+        with _session(session_id, workspace, env, timestamp, create=author_event,
+                      allow_workspace_change=author_event) as state:
             # Optional adapter field; current Codex hooks do not guarantee language.
             if "session_language" in payload:
                 language = _language(payload["session_language"])
@@ -1023,11 +1069,15 @@ def handle_event(payload: Mapping[str, Any], environment: Mapping[str, str] | No
                 return _event_context(event, _author_context(state, env, None))
             if event in {"UserPromptSubmit", "PreToolUse"}:
                 turn_id = _identity(payload.get("turn_id"), "turn_id")
-                turn = _bind_turn(state, turn_id)
+                turn = _bind_turn(state, turn_id, workspace)
                 if event == "PreToolUse":
                     state["tool_turn_id"] = turn_id
-                    if state.get("context_turn_id") == turn_id or turn["status"] == "skipped":
+                    if turn["status"] == "skipped":
                         return {}
+                    if state.get("context_turn_id") == turn_id:
+                        if turn["status"] == "committed":
+                            return {}
+                        return _event_context(event, _author_context(state, env, turn_id, reminder=True))
                 state["context_turn_id"] = turn_id
                 if event == "UserPromptSubmit" and _is_acknowledgement_prompt(payload.get("prompt")) and turn["status"] == "open":
                     turn.update(status="skipped", skip="acknowledgement")
@@ -1035,18 +1085,26 @@ def handle_event(payload: Mapping[str, Any], environment: Mapping[str, str] | No
                 return _event_context(event, _author_context(state, env, turn_id))
             pending = sorted((turn for turn in state["turns"].values() if turn["status"] == "staged"),
                              key=lambda turn: datetime.fromisoformat(turn["submitted_at"]))
+            deferred = 0
             for pending_turn in pending:
-                _commit(state, pending_turn)
+                if pending_turn.get("workspace", state["workspace"]) == str(workspace):
+                    _commit(state, pending_turn)
+                else:
+                    deferred += 1
+            notice = (f"Codex Worklog: {deferred} prepared turn(s) belong to another workspace; "
+                      "retained until the task returns there. " if deferred else "")
             if event == "SessionEnd":
-                return {}
+                return {"systemMessage": notice.strip()} if notice else {}
             turn_id = _identity(payload.get("turn_id") or state.get("last_turn_id"), "turn_id")
             turn = state["turns"].get(_token(turn_id))
             if not isinstance(turn, dict):
                 raise WorklogError("Stop has no initialized turn; no entry was written")
+            if turn.get("workspace", state["workspace"]) != str(workspace):
+                raise WorklogError("Stop turn belongs to another workspace")
             if turn.get("status") in {"committed", "skipped", "missing"}:
-                return {}
+                return {"systemMessage": notice.strip()} if notice else {}
             turn["status"] = "missing"
-            return {"systemMessage": "Codex Worklog: structured author submission missing; diary entry skipped. No facts were inferred from the final answer."}
+            return {"systemMessage": notice + "Codex Worklog: structured author submission missing; diary entry skipped. No facts were inferred from the final answer."}
     except (WorklogError, OSError, ValueError, TypeError) as error:
         message = str(error) if isinstance(error, WorklogError) else "storage operation failed; staged work was retained"
         return {"systemMessage": f"Codex Worklog: {message}."}

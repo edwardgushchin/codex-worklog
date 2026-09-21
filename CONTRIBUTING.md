@@ -33,7 +33,8 @@ The runtime intentionally uses only the Python standard library. Do not add a ru
 
 Changes must preserve these defaults unless a reviewed proposal explicitly replaces them:
 
-- worklogs live under the original session `cwd`;
+- worklogs live under each turn's host-bound `cwd`; only a new host turn can
+  switch projects, and old prepared blocks retain their original destination;
 - sessions share one daily append-only Markdown file with distinct block IDs;
 - the active model authors complete six-section blocks; the runtime validates,
   sanitizes, durably stages, and atomically commits submissions before returning

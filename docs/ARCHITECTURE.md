@@ -16,7 +16,7 @@ the complete schema and an exact, shell-quoted installed command, including
 session and turn arguments. The model does not reconstruct `PLUGIN_ROOT`,
 expand a skill-root alias, or search for a writer skill.
 
-From the original session working directory, the model supplies JSON on stdin
+From the working directory bound to the current host turn, the model supplies JSON on stdin
 to the provided command:
 
 ```text
@@ -107,10 +107,10 @@ accepted result, and automated checks from pending user acceptance.
 | --- | --- |
 | `SessionStart` | Establish versioned state tied to the original `cwd`; create no visible diary yet. |
 | `UserPromptSubmit` | Bind the current turn and return self-contained authoring instructions with its exact command. |
-| `PreToolUse` | Bind the host's actual turn, including automatic goal continuations; supply context once per turn or after compaction. |
+| `PreToolUse` | Bind the host's actual turn, including automatic goal continuations; repeat the current command and short schema until recorded or skipped. Refresh full context after compaction. |
 | `submit` | Validate the envelope and session binding, sanitize evidence, durably stage the blocks, and atomically commit them before reporting success. |
-| `Stop` | Retry prepared blocks not yet committed, using the same locked, deduplicating writer. |
-| `SessionEnd` | Retry any remaining prepared blocks; generate no additional summary. |
+| `Stop` | Retry prepared blocks for the current workspace, using the same locked, deduplicating writer. |
+| `SessionEnd` | Retry remaining prepared blocks for the current workspace; generate no additional summary. |
 
 Invalid submissions and storage failures make the command exit nonzero without
 reporting success. A failure after durable staging leaves that prepared content
@@ -125,6 +125,26 @@ latest `PreToolUse` binding only when `CODEX_THREAD_ID` matches that session and
 the binding is still current. An exact retry keeps its original entry, and a
 different payload cannot replace a committed block in the actual current turn.
 This does not read transcripts or infer turn IDs from work content.
+
+Delivering author context is not proof that a block was submitted. After the
+initial full guide, each `PreToolUse` for an open, missing, or staged turn
+returns a shorter reminder with the same quoted command, cwd, and schema.
+The model can recover the current command through its next local tool call;
+no separate service or retrieval CLI is required. Staged reminders preserve
+prepared work and ask for an exact retry, not a replacement summary or skip.
+Recorded and explicitly skipped turns receive no further command reminders.
+Reminders neither write diary content nor persist tool input, and cannot
+block a tool or trigger a new turn. A model still has to submit its work;
+this does not guarantee compliance when it ignores every reminder.
+
+When the host changes a task's `cwd`, only `UserPromptSubmit` or `PreToolUse`
+with a new turn ID can update the current workspace binding. `SessionStart`
+may supply generic context but cannot move a turn or authorize a submission.
+Every earlier turn retains its original destination; existing diary bytes are
+never moved. `submit` cannot rebind work across projects, even through the stale
+command adapter. `Stop` and `SessionEnd` warn about staged blocks belonging to
+another workspace and retain them until a new host turn returns there. This
+also lets new work proceed when the previous workspace is unavailable.
 
 A missing author submission produces a visible hook warning and no invented
 entry. Both enabled compatibility modes, `strict` and `advisory`, let hooks
@@ -145,7 +165,7 @@ author's prose keeps its chosen language.
 Default paths:
 
 ```text
-<original cwd>/.dev-diary/YYYY/MM/YYYY-MM-DD.md
+<turn's host-bound cwd>/.dev-diary/YYYY/MM/YYYY-MM-DD.md
 <PLUGIN_DATA>/sessions-v2/<session-token>.json
 ```
 
@@ -155,11 +175,17 @@ runtime-generated `codex-worklog-entry` marker. Entry order is commit order;
 observed chronology stays inside each block. Concurrent sessions use one daily
 file, and a resumed session uses the day of its new submission.
 
-Private state contains the original workspace binding, configured root,
+Private state contains the current and per-turn workspace bindings, configured root,
 identifiers, times, language, lifecycle metadata, and sanitized staged content.
 It does not store raw prompts, transcript locations or messages, tool dumps,
 or complete final responses. Existing per-session diaries and legacy state
 remain untouched; the new schema does not merge old pending summaries.
+
+Existing `sessions-v2` states are read in place. On the first workspace move,
+all earlier turns inherit the original workspace and the state becomes version
+3 under the same locked filename. Older runtimes then fail closed instead of
+writing old prepared content into the new project. Version 3 requires an
+explicit workspace on every turn; relative or missing bindings are rejected.
 
 The prepared payload is durably stored before the diary commit is attempted,
 so a failed publication does not discard it. Staging alone is not a successful
@@ -180,7 +206,7 @@ workspace directories or pre-existing files as a side effect.
 
 ## Paths and evidence
 
-- `CODEX_WORKLOG_DIR` must be a portable relative path inside the original
+- `CODEX_WORKLOG_DIR` must be a portable relative path inside the bound
   workspace. Traversal, absolute overrides, controls, and unsafe syntax fail.
 - Every destination is derived from validated session state and checked against
   that workspace, the configured root, the date filename, and the expected
@@ -211,6 +237,37 @@ state before acting. Runtime authoring instructions do not inject old diary
 content into every turn.
 
 ## Compatibility and acceptance
+
+### Cache-independent hook entry point
+
+`scripts/build_hook_commands.py` embeds the reviewable `hook_launcher.py` and
+the existing `_Directory`/`_locked` storage guards from `worklog.py` directly in
+each hook command. Standard-library compression keeps Windows commands below
+8,000 characters. Validation compares the exact command wrapper and decoded
+source bytes, allowing zlib implementations to produce different compressed bytes.
+There is no executable fallback file inside the same disposable cache.
+
+The launcher anchors and reads the runtime once, executes that exact source,
+and converts missing files, syntax errors, unexpected exits and invalid output
+into nonblocking JSON warnings with exit code 0. Partial output and exception
+messages are not forwarded. Hook output cannot deny or rewrite a tool or request
+a continuation. The separate model-facing `worklog.py submit` command bypasses
+this hook boundary and still fails nonzero on validation or storage errors.
+
+Launch diagnostics are stored outside the cache under `PLUGIN_DATA/diagnostics-v1`.
+The same storage guards, locks, atomic replacement and permission preservation
+used by the diary protect their daily append-only JSONL and last-observation
+state. Identical observations are deduplicated; a daily file is capped at 2 MiB.
+Records contain runtime identity/hash, UTC time, failure type and observer PIDs,
+not raw hook input or exception text. A missing runtime does not identify its
+deleter. The explicit updater logs its own operation IDs and cache inventories;
+changes by other processes remain unattributed. No background watcher is added.
+
+Old loaded direct-script hooks remain old commands even after installing this
+fix. Disable those hooks and load the reviewed definitions in a new task.
+Copying files back into old cache directories is only temporary recovery.
+
+### Platform acceptance
 
 The runtime targets Python 3.10 or newer with no third-party packages.
 Hook commands use `python3` on Unix-like hosts and `py -3` on Windows.

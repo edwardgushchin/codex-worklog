@@ -1,6 +1,6 @@
 {
   "name": "codex-worklog",
-  "version": "0.3.0",
+  "version": "1.0.0",
   "description": "Preserve model-authored context, decisions, checks, and next steps in a daily local worklog.",
   "author": {
     "name": "Eduard Gushchin",
