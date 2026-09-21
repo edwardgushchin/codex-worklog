@@ -228,7 +228,7 @@ class _Directory:
             # No FILE_SHARE_DELETE: an open ancestor cannot be renamed/replaced.
             handle = self.kernel.CreateFileW(str(current), 0x80, 3, None, 3, 0x02200000, None)
             if handle == ctypes.c_void_p(-1).value:
-                raise OSError("unable to anchor directory")
+                raise ctypes.WinError(ctypes.get_last_error())
             self.handles.append(handle)
             status = current.lstat()
             if _linked(status) or not stat.S_ISDIR(status.st_mode):
