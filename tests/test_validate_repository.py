@@ -84,6 +84,12 @@ class RepositoryValidatorTests(unittest.TestCase):
         (self.root / 'scripts/build_hook_commands.py').unlink()
         self.assert_validation_error('required file is missing: scripts/build_hook_commands.py')
 
+    def test_entire_runtime_is_pinned_by_the_reviewed_hook(self) -> None:
+        runtime = self.root / 'plugins/codex-worklog/scripts/worklog.py'
+        runtime.write_text(runtime.read_text(encoding='utf-8') + '\n# Changed non-storage runtime code\n',
+                           encoding='utf-8')
+        self.assert_validation_error('Unix command is not the reviewed runtime command')
+
     def test_launcher_validation_ignores_compression_but_not_source_or_wrapper(self) -> None:
         import base64
         import zlib

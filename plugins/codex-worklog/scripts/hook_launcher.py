@@ -44,7 +44,31 @@ def record_observation(observation, change_initiator='unknown'):
         return False
 
 
-def main():
+def retained_runtime(root, data, expected_digest):
+    """Pin reviewed code outside the disposable cache; never select a newer copy."""
+    if not isinstance(expected_digest, str) or not re.fullmatch(r'[0-9a-f]{64}', expected_digest):
+        raise WorklogError('reviewed runtime digest is unavailable')
+    path = data / 'runtimes-v1' / (expected_digest + '.py')
+    with _Directory(path.parent, create=True) as directory:
+        with _locked(directory, expected_digest + '.lock'):
+            source = directory.read(path.name, 512 * 1024)
+            if source is None:
+                with _Directory(root / 'scripts') as installed:
+                    source = installed.read('worklog.py', 512 * 1024)
+                if source is None:
+                    raise FileNotFoundError()
+                # Match the builder's universal-newline read on Windows too.
+                raw = source[0].decode('utf-8').replace('\r\n', '\n').replace('\r', '\n').encode('utf-8')
+                if hashlib.sha256(raw).hexdigest() != expected_digest:
+                    raise WorklogError('installed runtime does not match the reviewed hook')
+                directory.replace(path.name, raw, None)
+                source = directory.read(path.name, 512 * 1024)
+            if source is None or hashlib.sha256(source[0]).hexdigest() != expected_digest:
+                raise WorklogError('retained runtime does not match the reviewed hook')
+            return path, source
+
+
+def main(expected_digest=None):
     raw_root = os.environ.get('PLUGIN_ROOT') or os.environ.get('CLAUDE_PLUGIN_ROOT') or ''
     observation = {'runtime_root_id': hashlib.sha256(raw_root.encode('utf-8', errors='replace')).hexdigest()[:24],
                    'event': 'runtime_failed', 'runtime_sha256': None, 'runtime_version': None}
@@ -56,13 +80,8 @@ def main():
         root = _absolute(raw_root, 'PLUGIN_ROOT')
         if re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:[+.-][A-Za-z0-9.]+)?', root.name):
             observation['runtime_version'] = root.name
-        script = root / 'scripts/worklog.py'
-        # Anchor and read once: deleting/replacing the pathname after this read
-        # cannot change which source executes or turn an open race into exit 2.
-        with _Directory(root / 'scripts') as directory:
-            source = directory.read('worklog.py', 512 * 1024)
-        if source is None:
-            raise FileNotFoundError()
+        data = _absolute(os.environ.get('PLUGIN_DATA') or os.environ.get('CLAUDE_PLUGIN_DATA'), 'PLUGIN_DATA')
+        script, source = retained_runtime(root, data, expected_digest)
         raw, status = source
         observation['runtime_sha256'] = hashlib.sha256(raw).hexdigest()
         observation['runtime_file_id'] = [status.st_dev, status.st_ino, status.st_mtime_ns, status.st_size]

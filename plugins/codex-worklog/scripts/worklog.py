@@ -961,14 +961,17 @@ supersedes, never by replacing the same turn's submission.
 def _author_context(state: Mapping[str, Any], environment: Mapping[str, str],
                     turn_id: str | None, *, reminder: bool = False) -> str:
     if not turn_id:
-        skill = Path(__file__).resolve().parents[1] / "skills" / "worklog" / "SKILL.md"
+        root = environment.get("PLUGIN_ROOT") or environment.get("CLAUDE_PLUGIN_ROOT")
+        skill = (Path(root) if root else Path(__file__).resolve().parents[1]) / "skills" / "worklog" / "SKILL.md"
+        history = ("For requested history inspection, the exact skill path is "
+                   + json.dumps(str(skill), ensure_ascii=False)
+                   + ". Preserve repeated directory names; they are not a stale installation. "
+                   if skill.is_file() else "The cached history skill is unavailable; recording remains separate. ")
         return ("Codex Worklog records model-authored work blocks. UserPromptSubmit or "
                 "PreToolUse supplies the current turn's exact submission command and schema. "
                 "After resume/compaction, the next local tool refreshes that context; do not "
                 "reuse a command from a previous turn. No diary is created for empty sessions. "
-                "For requested history inspection, the exact skill path is "
-                + json.dumps(str(skill), ensure_ascii=False)
-                + ". Preserve repeated directory names; they are not a stale installation. "
+                + history
                 + "Current workspace diary root: " + json.dumps(state["directory"]) + ".")
     if state["turns"][_token(turn_id)]["status"] == "committed":
         return ("Codex Worklog: this turn is already recorded. Do not submit another block "

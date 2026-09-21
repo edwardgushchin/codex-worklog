@@ -177,10 +177,14 @@ codex plugin add codex-worklog@codex-worklog
 Codex installs a cached copy. After local changes, reinstall the plugin and start a new task so the updated hook definitions are loaded.
 
 Native installation can replace the **whole plugin cache**, including older
-versions referenced by open tasks. Saved hooks in this revision embed their
-failure boundary and safely warn if the package disappears. Legacy direct-script
-hooks cannot be retroactively fixed by editing a new package: disable the plugin
-in affected tasks before updating, then start a new task and review the new hooks.
+versions referenced by open tasks. This revision retains the reviewed runtime
+under `PLUGIN_DATA/runtimes-v1/<sha256>.py` before delivering author commands.
+Initialized hooks and outstanding submit commands keep working after cache
+replacement, using their pinned version rather than silently loading new code.
+Runtime copies are not automatically deleted while old tasks may need them.
+Tasks loaded before this retention fix still require a one-time reload: disable
+the plugin in affected tasks before updating, then load reviewed hooks in a new
+task. A warning from an old hook is not evidence that logging still works.
 
 ### Update or remove
 
