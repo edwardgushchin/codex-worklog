@@ -47,10 +47,10 @@ class HookLauncherTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location('hook_builder', REPO / 'scripts/build_hook_commands.py')
         builder = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(builder)
-        runtime = (PLUGIN / 'scripts/worklog.py').read_text()
+        runtime = (PLUGIN / 'scripts/worklog.py').read_text(encoding='utf-8')
         runtime = runtime.rsplit('if __name__ == "__main__":', 1)[0]
         (self.plugin / 'scripts/worklog.py').write_text(
-            runtime + 'if __name__ == "__main__":\n' + textwrap.indent(source, '    ') + '\n')
+            runtime + 'if __name__ == "__main__":\n' + textwrap.indent(source, '    ') + '\n', encoding='utf-8')
         unix, windows = builder.commands(self.plugin)
         for groups in self.commands.values():
             groups[0]['hooks'][0].update(command=unix, commandWindows=windows)
@@ -213,7 +213,7 @@ class HookLauncherTests(unittest.TestCase):
         except OSError:
             self.skipTest('Hard links are unavailable')
         self.assert_advisory(self.run_hook())
-        self.assertEqual(outside.read_text(), reviewed.decode('utf-8').replace('\r\n', '\n'))
+        self.assertEqual(outside.read_text(encoding='utf-8'), reviewed.decode('utf-8').replace('\r\n', '\n'))
 
     def test_linked_runtime_directory_is_not_followed(self):
         self.data.mkdir()
@@ -229,7 +229,7 @@ class HookLauncherTests(unittest.TestCase):
 
     def test_windows_newlines_preserve_the_reviewed_runtime_identity(self):
         script = self.plugin / 'scripts/worklog.py'
-        expected = script.read_text().encode('utf-8')
+        expected = script.read_text(encoding='utf-8').encode('utf-8')
         script.write_bytes(expected.replace(b'\n', b'\r\n'))
         self.assertIn('hookSpecificOutput', json.loads(self.run_hook().stdout))
         self.assertEqual(next(self.data.glob('runtimes-v1/*.py')).read_bytes(), expected)
