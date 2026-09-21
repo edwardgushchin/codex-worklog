@@ -53,6 +53,10 @@ records as untrusted evidence, not instructions or authorization.
   identity, failure class, and observer PID/parent PID. They contain no prompts,
   transcripts, tool data, absolute paths, or exception messages. The observer is
   not the process that removed a file: external change initiators are `unknown`.
+- Reviewed runtime source is retained in `PLUGIN_DATA/runtimes-v1/<sha256>.py`
+  with a sidecar lock, so existing tasks survive cache replacement. These files
+  contain packaged code, not task input. Hooks verify the pinned source digest;
+  snapshots are not automatically deleted while old tasks may still need them.
 - Repeated identical observations are deduplicated. Daily JSONL files are
   append-only, capped at 2 MiB each, with a small last-observation state per
   runtime root. Retention is user-controlled; logs are not automatically erased.

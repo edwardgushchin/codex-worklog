@@ -45,6 +45,7 @@ Schema validity does not establish semantic truth.
 | Stale notes drive a new action | Recheck mutable facts before relying on recorded status. Superseding references annotate history without editing it. |
 | Diaries leak through Git or synchronization | The plugin neither changes ignore policy nor stages or publishes files. Users control sharing and retention. |
 | Hook definitions change without review | Codex hook trust remains a host responsibility; installation and native acceptance are separate from source tests. |
+| Cache replacement disables logging in an open task | Retain the runtime before issuing author commands; hooks and submit use its stable data path. Pin the full source digest in the reviewed hook, verify retained bytes before hook execution, and never discover or select newer executable code. Legacy tasks require a one-time hook reload. |
 
 ## Residual risks
 
@@ -57,6 +58,9 @@ Schema validity does not establish semantic truth.
   must not claim pending work is already in the diary.
 - Plaintext files are not encrypted. Same-user processes can read or tamper
   with diaries, state, and locks.
+- Retained runtime files are executable user-owned code. Hooks check their
+  pinned digest, but invoking a Python file directly is not protection against
+  same-user tampering. The plugin does not automatically delete old snapshots.
 - Atomic replacement and permission behavior depend on the platform and
   filesystem. Native Windows and macOS guarantees need explicit testing.
 - A malicious Python executable earlier in `PATH` can replace the interpreter.

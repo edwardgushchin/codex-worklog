@@ -245,10 +245,20 @@ the existing `_Directory`/`_locked` storage guards from `worklog.py` directly in
 each hook command. Standard-library compression keeps Windows commands below
 8,000 characters. Validation compares the exact command wrapper and decoded
 source bytes, allowing zlib implementations to produce different compressed bytes.
-There is no executable fallback file inside the same disposable cache.
+The command also pins the SHA-256 of the full runtime (with normalized newlines).
+Any runtime edit requires regeneration and host review of the changed hook.
 
-The launcher anchors and reads the runtime once, executes that exact source,
-and converts missing files, syntax errors, unexpected exits and invalid output
+Before author context is delivered, the launcher checks and atomically retains
+that exact runtime at `PLUGIN_DATA/runtimes-v1/<sha256>.py`, using the existing
+path guards and lock. Later invocations read and verify this retained copy;
+they do not scan for a newer version or depend on the old cache still existing.
+The retained path becomes `__file__`, so already issued submit commands also
+survive cache replacement. Copies are immutable in normal operation and not
+garbage-collected automatically: old loaded tasks can still need them.
+The history skill remains cache-owned; an absent skill path is not advertised.
+
+The launcher executes the exact bytes it verified and converts missing files
+before initial retention, digest mismatches, unexpected exits and invalid output
 into nonblocking JSON warnings with exit code 0. Partial output and exception
 messages are not forwarded. Hook output cannot deny or rewrite a tool or request
 a continuation. The separate model-facing `worklog.py submit` command bypasses
@@ -263,16 +273,18 @@ not raw hook input or exception text. A missing runtime does not identify its
 deleter. The explicit updater logs its own operation IDs and cache inventories;
 changes by other processes remain unattributed. No background watcher is added.
 
-Old loaded direct-script hooks remain old commands even after installing this
-fix. Disable those hooks and load the reviewed definitions in a new task.
-Copying files back into old cache directories is only temporary recovery.
+Already loaded hooks from versions without retention cannot acquire this fix
+retroactively. Reload reviewed definitions once at a safe task boundary. Do not
+test cache deletion on such a working task or equate a nonblocking warning with
+successful diary delivery. Copying files into old cache paths is only temporary
+recovery, not a durable upgrade mechanism.
 
 ### Platform acceptance
 
 The runtime targets Python 3.10 or newer with no third-party packages.
 Hook commands use `python3` on Unix-like hosts and `py -3` on Windows.
-`PLUGIN_ROOT` locates the installed runtime and `PLUGIN_DATA` owns private
-state. No project-specific task tracker, test workflow, design tool, or
+`PLUGIN_ROOT` supplies the initial reviewed source; `PLUGIN_DATA` owns retained
+runtime code and private state. No project-specific task tracker, test workflow, design tool, or
 acceptance process is required.
 
 Release validation must check current Codex hook behavior, supported native

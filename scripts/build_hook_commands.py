@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import ast
 import base64
+import hashlib
 import json
 from pathlib import Path
 import zlib
@@ -35,6 +36,8 @@ def commands(plugin: Path = PLUGIN) -> tuple[str, str]:
               'from contextlib import contextmanager\n'
               'LOCK_TIMEOUT = 0.1\n' + '\n\n'.join(shared) + '\n')
     launcher = (plugin / 'scripts/hook_launcher.py').read_text(encoding='utf-8')
+    digest = hashlib.sha256(runtime.encode('utf-8')).hexdigest()
+    launcher = launcher.replace('    main()\n', f'    main({digest!r})\n')
     source += launcher.replace('from worklog import WorklogError, _Directory, _absolute, _locked\n', '')
     compile(source, '<worklog-hook-launcher>', 'exec')
     payload = base64.b64encode(zlib.compress(source.encode('utf-8'), 9)).decode('ascii')

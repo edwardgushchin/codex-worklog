@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Explicit, locally audited reinstall; never invoked by lifecycle hooks.
 
-Close/disable legacy-hook tasks first. Native installation can remove old cache
-directories. This tool logs its own operation, not operations performed by the
+Close/disable pre-retention tasks first. Initialized retention-aware hooks keep
+their pinned runtime when native installation removes old cache directories.
+This tool logs its own operation, not operations performed by the
 Codex UI, other processes, or an administrator. No raw CLI output is retained.
 """
 from __future__ import annotations
@@ -57,7 +58,8 @@ def main():
     if not record('update_completed'):
         print('Codex Worklog: install finished but completion audit was not saved.', file=sys.stderr)
         return 1
-    print('Codex Worklog: update audited. Start a new task and review the new hook definitions.')
+    print('Codex Worklog: update audited. Initialized retention-aware tasks keep their pinned runtime. '
+          'Start a new task and review the new hooks to use the updated code; legacy tasks require reload.')
     return 0
 
 

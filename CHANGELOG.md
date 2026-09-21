@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-09-21
+
+### Fixed
+
+- Keep the reviewed runtime under `PLUGIN_DATA/runtimes-v1/<sha256>.py`
+  before delivering author commands. Already loaded hooks, outstanding submit
+  commands, next turns and staged retries survive removal of the installed cache.
+  Pin the digest in the trusted hook definition; never select a newer cached
+  version or execute a mismatched retained file. Pre-retention tasks still need
+  a one-time reload of reviewed hooks.
+- Require actual diary commits after native cache replacement in regression
+  coverage, rather than only checking nonblocking warnings.
+
 ## [1.0.0] - 2026-09-21
 
 ### Changed
@@ -203,7 +216,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Reject non-portable directory overrides, invalid hook paths, corrupt, oversized, or cross-workspace state, and sanitize control characters in model-visible metadata.
 - Reduced GitHub workflow token permissions and disabled checkout credential persistence.
 
-[Unreleased]: https://github.com/edwardgushchin/codex-worklog/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/edwardgushchin/codex-worklog/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/edwardgushchin/codex-worklog/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/edwardgushchin/codex-worklog/compare/v0.3.0...v1.0.0
 [0.3.0]: https://github.com/edwardgushchin/codex-worklog/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/edwardgushchin/codex-worklog/compare/v0.1.0...v0.2.0
