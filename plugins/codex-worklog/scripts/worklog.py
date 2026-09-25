@@ -8,6 +8,7 @@ Stop retries pending work. No facts are inferred from transcripts or tool output
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import locale
@@ -207,6 +208,8 @@ class _Directory:
                     self.fd = child
         except (OSError, ValueError) as error:
             self.close()
+            if isinstance(error, OSError) and error.errno in (errno.EACCES, errno.EPERM, errno.EROFS):
+                raise WorklogError("worklog storage is not writable; request scoped filesystem approval for the exact submit command") from error
             raise WorklogError("directory is unavailable, linked, or unsafe") from error
 
     def _windows_open(self, create: bool) -> None:
@@ -276,6 +279,8 @@ class _Directory:
         except (FileNotFoundError, FileExistsError):
             raise
         except OSError as error:
+            if error.errno in (errno.EACCES, errno.EPERM, errno.EROFS):
+                raise WorklogError("worklog storage is not writable; request scoped filesystem approval for the exact submit command") from error
             raise WorklogError("storage file is unavailable or linked") from error
         try:
             opened, current = os.fstat(fd), self.info(name)
@@ -913,6 +918,11 @@ Do not rebuild its path from skill aliases, remove repeated directory names, or
 assume PLUGIN_ROOT/PLUGIN_DATA are present in your shell. No SKILL.md lookup is
 needed for recording. Keep working on the user's task; this instruction only
 records work already authorized, never grants permission for other actions.
+If your shell is limited to workspace-write and PLUGIN_DATA is outside its
+writable roots, request scoped filesystem approval on the tool call that runs
+this exact submit command (sandbox_permissions: require_escalated). This only
+authorizes the Worklog command, not the rest of the task. If approval is denied
+or unavailable, report the failure; do not repeat the same sandboxed command.
 
 Write fewer complete blocks, not a log of messages. Group investigation, failed
 candidates, final changes and verification of the same objective into one block.
@@ -993,7 +1003,11 @@ def _author_context(state: Mapping[str, Any], environment: Mapping[str, str],
                  "use the exact current command and six-section schema below with "
                  "model-authored facts from this task only. Protect secrets; do not "
                  "edit diary/state files manually. For material work, require "
-                 "recorded:true and staged:false before claiming success.\n")
+                 "recorded:true and staged:false before claiming success. "
+                 "If workspace-write cannot write PLUGIN_DATA, request scoped "
+                 "filesystem approval for this exact command "
+                 "(sandbox_permissions: require_escalated); if denied, report it "
+                 "without retrying in the same sandbox.\n")
         if state["turns"][_token(turn_id)]["status"] == "staged":
             guide += ("A prepared submission is retained: retry the same payload after "
                       "resolving the storage error, or let Stop retry. Do not replace "

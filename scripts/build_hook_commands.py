@@ -30,7 +30,7 @@ def commands(plugin: Path = PLUGIN) -> tuple[str, str]:
     if len(shared) != len(names):
         raise ValueError('Required runtime storage helpers are missing')
     source = ('from __future__ import annotations\n'
-              'import os, secrets, stat, time, unicodedata\n'
+              'import errno, os, secrets, stat, time, unicodedata\n'
               'from pathlib import Path\n'
               'from typing import Any, Iterator\n'
               'from contextlib import contextmanager\n'
