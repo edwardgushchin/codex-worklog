@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-09-25
+
+### Fixed
+
+- Explain when a workspace-write shell cannot write the plugin's private state,
+  and direct the author to request scoped filesystem approval for the exact
+  submit command. Repeat the permission guidance after compaction without
+  changing submission or deduplication semantics.
+- Distinguish read-only and permission-denied storage errors from missing or
+  linked files. A refused approval remains an explicit failure, never a false
+  diary commit or an automatic full-access retry.
+
 ## [1.0.1] - 2026-09-21
 
 ### Fixed
@@ -216,7 +228,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Reject non-portable directory overrides, invalid hook paths, corrupt, oversized, or cross-workspace state, and sanitize control characters in model-visible metadata.
 - Reduced GitHub workflow token permissions and disabled checkout credential persistence.
 
-[Unreleased]: https://github.com/edwardgushchin/codex-worklog/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/edwardgushchin/codex-worklog/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/edwardgushchin/codex-worklog/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/edwardgushchin/codex-worklog/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/edwardgushchin/codex-worklog/compare/v0.3.0...v1.0.0
 [0.3.0]: https://github.com/edwardgushchin/codex-worklog/compare/v0.2.0...v0.3.0

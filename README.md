@@ -84,6 +84,8 @@ after the daily file is committed. A storage failure exits nonzero without
 reporting success; prepared blocks remain staged for a command or hook retry.
 An explicit skip is acknowledged separately and creates no diary entry.
 
+In a `workspace-write` task, the shell may be unable to write Codex's `PLUGIN_DATA` even when the project diary is writable. The authoring context asks for scoped filesystem approval on the exact `submit` tool call in that case. If approval is unavailable, the command fails explicitly and the author must report the missing entry; repeating it in the same sandbox cannot help.
+
 Text limits apply after sanitization too. If redaction expands an item beyond
 its limit, `submit` rejects it before staging and asks the author to shorten it;
 existing prepared work is retained, and evidence is not silently truncated.

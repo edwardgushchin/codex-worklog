@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import errno
 import os
 import stat
 import subprocess
@@ -109,6 +110,27 @@ class StorageSecurityTests(unittest.TestCase):
         original = self.diary.read_bytes()
         self.assertEqual(self.handle("Stop"), {})
         self.assertEqual(self.diary.read_bytes(), original)
+
+    def test_read_only_plugin_data_reports_approval_without_false_commit(self) -> None:
+        initial = self.handle("UserPromptSubmit")["hookSpecificOutput"]["additionalContext"]
+        reminder = self.handle("PreToolUse")["hookSpecificOutput"]["additionalContext"]
+        for guide in (initial, reminder):
+            self.assertIn("sandbox_permissions: require_escalated", guide)
+        original_open = os.open
+        lock = hashlib.sha256(b"storage-session").hexdigest()[:24] + ".lock"
+
+        def deny_plugin_lock(path, flags, *args, **kwargs):
+            if Path(path).name == lock and flags & os.O_RDWR:
+                raise OSError(errno.EROFS, "Read-only file system")
+            return original_open(path, flags, *args, **kwargs)
+
+        with mock.patch.object(worklog.os, "open", side_effect=deny_plugin_lock):
+            with self.assertRaisesRegex(worklog.WorklogError, "scoped filesystem approval"):
+                self.submit()
+        self.assertFalse(self.diary.exists())
+        state = json.loads(self.state_path().read_text(encoding="utf-8"))
+        self.assertEqual({item["status"] for item in state["turns"].values()}, {"open"})
+        self.assertTrue(self.submit()["recorded"])
 
     def test_payload_cannot_select_readme_or_supply_markers(self) -> None:
         self.start()
